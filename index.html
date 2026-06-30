@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>micro-react demo</title>
+  <link rel="stylesheet" href="main.css">
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import MicroReact from './micro-react.js';
+
+window.html = MicroReact.html;
+window.Fragment = MicroReact.Fragment;
+window.ErrorBoundary = MicroReact.ErrorBoundary;
+window.h = MicroReact.createElement;
+window.useState = MicroReact.useState;
+window.useReducer = MicroReact.useReducer;
+window.useEffect = MicroReact.useEffect;
+window.useLayoutEffect = MicroReact.useLayoutEffect;
+window.useRef = MicroReact.useRef;
+window.useMemo = MicroReact.useMemo;
+window.useCallback = MicroReact.useCallback;
+window.useId = MicroReact.useId;
+window.createContext = MicroReact.createContext;
+window.memo = MicroReact.memo;
+window.Router = MicroReact.Router;
+window.Link = MicroReact.Link;
+window.useLocation = MicroReact.useLocation;
+window.useNavigate = MicroReact.useNavigate;
+window.render = MicroReact.render;
+
+await import('./script.js');
+</script>
+</body>
+</html>
