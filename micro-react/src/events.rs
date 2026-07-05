@@ -1,22 +1,8 @@
-// ─── events.rs ────────────────────────────────────────────────────────────────
-//
-// Preact logical-clock event proxy.
-//
-// Problem: if you mount a node INSIDE a click handler, the click event that
-// triggered the mount can bubble INTO the newly-mounted node and fire its
-// click handler — the so-called "event fire after mount" race.
-//
-// Solution (from Preact): attach a SINGLE proxy listener per (element × event
-// × capture).  The proxy records the time each handler was *attached*
-// (`__mrAttached`, via `performance.now()`) and compares it against the
-// dispatching event's own `timeStamp` (which uses the same clock).  If the
-// attachment happened after the event started dispatching, the event is
-// suppressed.
-//
-// Handlers are stored on a JS object property so the proxy can read them
-// without keeping Rust borrows live across async boundaries.
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── events.rs ───
+// Preact-style logical-clock event proxy, guards against a handler firing
+// on the same event that triggered its own mount ("fire after mount").
+// One proxy listener per (element, event, capture) compares attach time to the event's timeStamp to suppress stale fires.
+// ─────────────────
 
 use wasm_bindgen::{prelude::*, JsCast};
 use js_sys::{Function, Reflect};
@@ -24,17 +10,10 @@ use js_sys::{Function, Reflect};
 /// Property names on the DOM element for the listeners map.
 const LISTENERS_KEY: &str = "__mrListeners";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Public API ───
 
 /// Set or remove an event handler on a DOM element.
-///
-/// * `elem`       – the DOM element
-/// * `event_name` – lowercase event name, e.g. "click"
-/// * `capture`    – true for capture phase
-/// * `handler`    – `Some(fn)` to set, `None` to remove
-/// * `old_handler`– previous handler value (may be null)
+/// `handler: None` removes; `old_handler` is the previous value (may be null).
 pub fn set_event_handler(
     elem: &web_sys::Element,
     event_name: &str,
@@ -51,9 +30,7 @@ pub fn set_event_handler(
 
     match handler {
         Some(h) => {
-            // Record the time at which this handler was attached, on the same
-            // clock as `Event.timeStamp` (performance.now()-relative), so the
-            // proxy can compare them directly.
+            // Record attach time on the same clock as Event.timeStamp.
             let attached_at = web_sys::window()
                 .and_then(|w| w.performance())
                 .map(|p| p.now())
@@ -101,9 +78,7 @@ pub fn set_event_handler(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Internal helpers ───
 
 fn ensure_listeners(elem: &JsValue) -> js_sys::Object {
     match Reflect::get(elem, &JsValue::from_str(LISTENERS_KEY)) {
@@ -128,13 +103,8 @@ fn listener_key(event_name: &str, capture: bool) -> String {
 
 /// Create a proxy closure for the given phase.
 fn make_proxy(capture: bool) -> js_sys::Function {
-    // The proxy is a JS function that reads the current handler from
-    // `this.__mrListeners[eventName+capture]` and calls it with the clock
-    // guard: if the handler was attached *after* this event started
-    // dispatching (e.g. because the click that's currently bubbling also
-    // mounted the node we're now on), suppress the call. `event.timeStamp`
-    // and `performance.now()` (used for `__mrAttached`, see set_event_handler
-    // above) share the same clock, so they can be compared directly.
+    // Reads the current handler and suppresses it if it was attached
+    // after this event started dispatching (see set_event_handler).
     let code = format!(r#"
         const key = event.type + {capture_str};
         const listeners = this['{listeners_key}'];
@@ -154,14 +124,10 @@ fn make_proxy(capture: bool) -> js_sys::Function {
     Function::new_with_args("event", &code)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// React-style event name normalisation
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── React-style event name normalisation ───
 
 /// Convert a React-style camelCase event prop name to a DOM event name + capture flag.
-/// e.g. "onClick"        → ("click", false)
-///      "onClickCapture" → ("click", true)
-///      "onMouseEnter"   → ("mouseenter", false)
+/// e.g. "onClickCapture" → ("click", true)
 pub fn parse_event_prop(prop: &str) -> Option<(String, bool)> {
     if !prop.starts_with("on") { return None; }
     let rest = &prop[2..]; // strip "on"

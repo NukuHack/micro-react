@@ -1,13 +1,6 @@
-// ─── render.rs ───────────────────────────────────────────────────────────────
-//
+// ─── render.rs ───
 // createRoot / render — mirrors React 18 / MicroReact JS API.
-//
-// Usage:
-//   let root = Root::new(document.get_element_by_id("app").unwrap());
-//   root.render(my_vnode);
-//   root.unmount();
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────
 
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, Node};
@@ -16,9 +9,7 @@ use crate::vnode::{VNode, VNodeInner, Children};
 use crate::diff::{diff_node, diff_children, unmount_vnode};
 use crate::scheduler::{run_layout_effects, run_effects};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Root
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Root ───
 
 pub struct Root {
     container: Element,
@@ -92,9 +83,7 @@ impl Root {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Convenience free function (mirrors MicroReact.render in JS)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Convenience free function (mirrors MicroReact.render in JS) ───
 
 /// Render `vnode` into `container`, replacing any existing content.
 /// Returns the root handle for subsequent updates / unmounts.

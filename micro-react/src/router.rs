@@ -1,17 +1,7 @@
-// ─── router.rs ───────────────────────────────────────────────────────────────
-//
-// SPA router — same API as the JS version.
-//
-// Usage:
-//   let router = Router::new(routes! {
-//       "/" => home_component,
-//       "/about" => about_component,
-//       "/user/:id" => user_component,
-//       "*" => not_found_component,
-//   });
-//   router.render()
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── router.rs ───
+// SPA router — same API as the JS version. Match routes by path pattern
+// (including ":param" segments and a "*" catch-all) and render the match.
+// ─────────────────
 
 use std::collections::HashMap;
 use wasm_bindgen::{prelude::*, JsCast};
@@ -22,9 +12,7 @@ use crate::hooks::{use_state, use_effect_nodrop};
 use crate::context::Context;
 use crate::bindings::{js_to_vnode, vnode_to_js};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pattern matching
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Pattern matching ───
 
 /// Compiled route pattern.
 pub struct Pattern {
@@ -85,18 +73,14 @@ fn regex_escape(s: &str) -> String {
     }).collect()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Route
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Route ───
 
 pub struct Route {
     pub pattern: Pattern,
     pub component: ComponentFn,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Router component
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Router component ───
 
 /// A declarative router component.
 pub fn make_router(routes: Vec<Route>) -> ComponentFn {
@@ -157,16 +141,7 @@ pub fn make_router(routes: Vec<Route>) -> ComponentFn {
 }
 
 /// Convenience macro for declaring routes.
-///
-/// ```rust
-/// use micro_react_wasm::router::{make_router, Route, Pattern};
-/// use micro_react_wasm::vnode::ComponentFn;
-///
-/// let router = make_router(vec![
-///     Route { pattern: Pattern::compile("/"),      component: ComponentFn::new(|_| home()) },
-///     Route { pattern: Pattern::compile("/about"), component: ComponentFn::new(|_| about()) },
-/// ]);
-/// ```
+/// e.g. `routes! { "/" => home, "/about" => about }`
 #[macro_export]
 macro_rules! routes {
     ($($pattern:literal => $comp:expr),* $(,)?) => {
@@ -181,9 +156,7 @@ macro_rules! routes {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Link component
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Link component ───
 
 pub fn link(to: &str, children: Vec<VNode>) -> VNode {
     let to = to.to_string();
@@ -210,9 +183,7 @@ pub fn link(to: &str, children: Vec<VNode>) -> VNode {
         .build()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useNavigate
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useNavigate ───
 
 /// Returns a `navigate(to: &str)` closure.
 pub fn use_navigate() -> impl Fn(&str) {
@@ -224,15 +195,7 @@ pub fn use_navigate() -> impl Fn(&str) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// JS-visible bindings
-//
-// These mirror the JS-only Router/Link/useLocation/useNavigate that used to
-// live as plain functions in index.html. They're implemented here on top of
-// the same Rust hooks (use_state / use_effect_nodrop) and Context machinery
-// used by createContext, so index.html only needs `window.Router = ...`
-// style assignments — no real component logic in JS.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── JS-visible bindings: mirrors Router/Link/useLocation/useNavigate on the same hooks/Context machinery, so index.html just assigns window.Router = ... ───
 
 thread_local! {
     /// Shared location context: { path, search, params }
@@ -246,10 +209,8 @@ fn current_location() -> (String, String) {
     (path, search)
 }
 
-/// `Router({ routes })` — `routes` is a plain JS object mapping a path
-/// pattern (e.g. `"/user/:id"`) to a zero-arg render function returning a
-/// vnode. Matches the current URL, listens for `popstate`, and provides
-/// `{ path, search, params }` via the location context used by `useLocation`.
+/// `Router({ routes })` matches the current URL against the given path
+/// patterns and provides `{ path, search, params }` via the location context.
 #[wasm_bindgen(js_name = Router)]
 pub fn js_router(props: JsValue) -> JsValue {
     let routes_obj = Reflect::get(&props, &"routes".into()).unwrap_or(JsValue::NULL);

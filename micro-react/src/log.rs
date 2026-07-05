@@ -1,8 +1,6 @@
-// ─── log.rs ───────────────────────────────────────────────────────────────
-// Basic logging support that forwards messages to the browser's JS console.
-// Mirrors the familiar `console.log/warn/error` triad so the rest of the
-// crate (and panics, via console_error_panic_hook) show up in dev tools.
-// ─────────────────────────────────────────────────────────────────────────
+// ─── log.rs ───────────────────────────────────
+// Forwards log/warn/error messages to the browser's JS console.
+// ────────────────────────────────────────────────
 
 /// Log an info-level message to `console.log`.
 #[macro_export]

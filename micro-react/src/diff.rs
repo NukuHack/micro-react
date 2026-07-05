@@ -20,16 +20,14 @@ use crate::vnode::{
     VNode, VNodeInner, Props, PropVal, Children, ComponentFn,
     NodeRef, FLAG_INSERT, FLAG_MATCHED,
 };
-use crate::hooks::{ComponentInst, with_inst};
+use crate::hooks::{ComponentInst, with_inst, unmount_inst};
 use crate::events::{set_event_handler, parse_event_prop};
 
 const SVG_NS:  &str = "http://www.w3.org/2000/svg";
 const MATH_NS: &str = "http://www.w3.org/1998/Math/MathML";
 const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal component tree node (wraps ComponentInst in Rc<RefCell>)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Internal component tree node (wraps ComponentInst in Rc<RefCell>) ───
 use std::cell::RefCell;
 
 /// Every function-component vnode gets one of these.
@@ -39,9 +37,7 @@ pub struct ComponentNode {
     pub last_vnode: Option<VNode>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Thread-local render depth guard
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Thread-local render depth guard ───
 thread_local! {
     static RENDER_DEPTH: RefCell<u32> = RefCell::new(0);
 }
@@ -63,9 +59,27 @@ fn release_depth() {
     RENDER_DEPTH.with(|d| *d.borrow_mut() -= 1);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// diff_node — main recursive entry
-// ─────────────────────────────────────────────────────────────────────────────
+/// RAII guard around a `guard_depth()` increment, so a panic unwinding
+/// through the stack still releases it instead of permanently leaking RENDER_DEPTH.
+struct DepthGuard;
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        release_depth();
+    }
+}
+
+/// Extract a human-readable message from a caught panic payload.
+fn panic_message(e: &(dyn std::any::Any + Send + 'static)) -> String {
+    if let Some(s) = e.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+// ─── diff_node — main recursive entry ───
 
 pub fn diff_node(
     parent_dom: &Node,
@@ -74,9 +88,8 @@ pub fn diff_node(
     ns: &str,
 ) -> Result<Option<Node>, JsValue> {
     guard_depth()?;
-    let result = diff_node_inner(parent_dom, new_vnode, old_vnode, ns);
-    release_depth();
-    result
+    let _guard = DepthGuard;
+    diff_node_inner(parent_dom, new_vnode, old_vnode, ns)
 }
 
 fn diff_node_inner(
@@ -87,6 +100,13 @@ fn diff_node_inner(
 ) -> Result<Option<Node>, JsValue> {
     match &new_vnode.inner {
         VNodeInner::Null => {
+            // A component can render `null` after a throw (createElement
+            // substitutes VNode::null() on error). Unmount any old subtree properly instead of just dropping our _dom, so hooks/effects don't leak.
+            if let Some(old) = old_vnode {
+                if !matches!(old.inner, VNodeInner::Null) {
+                    unmount_vnode(old, false);
+                }
+            }
             new_vnode._dom = None;
             Ok(None)
         }
@@ -119,9 +139,7 @@ fn diff_node_inner(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fragment
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Fragment ───
 
 fn diff_fragment(
     parent_dom: &Node,
@@ -151,9 +169,7 @@ fn diff_fragment(
     Ok(new_vnode._dom.clone())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Portal
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Portal ───
 
 fn diff_portal(
     new_vnode: &mut VNode,
@@ -182,9 +198,7 @@ fn diff_portal(
     Ok(None)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Element
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Element ───
 
 fn diff_element(
     parent_dom: &Node,
@@ -271,9 +285,7 @@ fn diff_element(
     Ok(Some(dom_node))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Component
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Component ───
 
 fn diff_component(
     parent_dom: &Node,
@@ -286,10 +298,8 @@ fn diff_component(
         _ => unreachable!(),
     };
 
-    // Reuse the component instance across re-renders: the old vnode (matched
-    // by diff_children via type+key) carries the live instance from its own
-    // mount, so grab it instead of starting fresh. This is what lets hooks
-    // (state, refs, effects) survive across renders.
+    // Reuse the component instance across re-renders (matched by diff_children
+    // via type+key), so hooks (state, refs, effects) survive across renders.
     let reused_inst: Option<Rc<RefCell<ComponentInst>>> = old_vnode.and_then(|o| match &o.inner {
         VNodeInner::Component { inst, .. } => inst.0.borrow().clone(),
         _ => None,
@@ -300,9 +310,8 @@ fn diff_component(
         None => Rc::new(RefCell::new(ComponentInst::new())),
     };
 
-    // The previous output of *this* instance (not the matched old vnode
-    // itself — that's a stand-in for "did we mount before", the real old
-    // tree to diff against lives on the instance).
+    // The instance's own previous output, not the matched old vnode itself
+    // (which is just a stand-in for "did we mount before").
     let old_rendered = inst_rc.borrow().last_vnode.clone();
 
     {
@@ -313,15 +322,39 @@ fn diff_component(
         inst.dirty = false;
     }
 
+    // Raw pointer is only sound for this synchronous call, while inst_rc is
+    // alive on the stack. Anything that outlives it captures inst_weak instead.
     let inst_ptr = inst_rc.as_ptr() as *mut ComponentInst;
+    let inst_weak = Rc::downgrade(&inst_rc);
 
-    // Run render function with this component as the current instance
-    let render_result = with_inst(inst_ptr, || render.call(props.clone()));
+    // catch_unwind: a user component panicking (bad hook usage, JS callback
+    // errors) is contained to "renders null this pass" instead of taking down the whole app.
+    let render_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_inst(inst_ptr, inst_weak, || render.call(props.clone()))
+    })) {
+        Ok(vnode) => vnode,
+        Err(e) => {
+            let msg = panic_message(&*e);
+            crate::console_error!("[micro-react] component render panicked: {}", msg);
+            crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg));
+            VNode::null()
+        }
+    };
 
     let mut rendered = render_result;
     rendered._depth = new_vnode._depth + 1;
 
-    let dom = diff_node(parent_dom, &mut rendered, old_rendered.as_ref(), ns)?;
+    // If this component registered as an error boundary, make it visible on
+    // the boundary stack while diffing its own subtree, the only window a descendant's failure can report to it.
+    let is_boundary = inst_rc.borrow().error_setter.is_some();
+    if is_boundary {
+        crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
+    }
+    let dom = diff_node(parent_dom, &mut rendered, old_rendered.as_ref(), ns);
+    if is_boundary {
+        crate::hooks::pop_boundary();
+    }
+    let dom = dom?;
     new_vnode._dom = dom.clone();
 
     // Persist everything a future setState-triggered re-render needs.
@@ -343,36 +376,57 @@ fn diff_component(
     Ok(dom)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// rerender_component — called by the scheduler for dirty instances
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── rerender_component — called by the scheduler for dirty instances ───
 
-pub fn rerender_component(inst: *mut ComponentInst) {
-    // Safety: single-threaded WASM, inst is kept alive by the vnode tree
-    // (held via the Rc stashed in the matched Component vnode's inst slot).
-    unsafe {
-        (*inst).dirty = false;
-        (*inst).reset_hooks();
+pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
+    {
+        let mut i = inst_rc.borrow_mut();
+        i.dirty = false;
+        i.reset_hooks();
     }
 
-    let (render_fn, props, parent_node, ns, old_rendered, depth) = unsafe {
-        let i = &*inst;
+    let (render_fn, props, parent_node, ns, old_rendered, depth) = {
+        let i = inst_rc.borrow();
         let render_fn = match &i.render_fn { Some(r) => r.clone(), None => return };
         let parent_node = match &i.last_parent_dom { Some(p) => p.clone(), None => return };
         (render_fn, i.last_props.clone(), parent_node, i.last_ns.clone(), i.last_vnode.clone(), i.depth)
     };
 
-    let mut rendered = with_inst(inst, || render_fn.call(props));
+    // Same reasoning as diff_component: raw pointer valid only for this call.
+    let inst_ptr = inst_rc.as_ptr() as *mut ComponentInst;
+    let inst_weak = Rc::downgrade(&inst_rc);
+
+    let mut rendered = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_inst(inst_ptr, inst_weak, || render_fn.call(props))
+    })) {
+        Ok(vnode) => vnode,
+        Err(e) => {
+            let msg = panic_message(&*e);
+            crate::console_error!("[micro-react] component render panicked: {}", msg);
+            crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg));
+            return;
+        }
+    };
     rendered._depth = depth + 1;
 
-    if diff_node(&parent_node, &mut rendered, old_rendered.as_ref(), &ns).is_ok() {
-        unsafe { (*inst).last_vnode = Some(rendered); }
+    let is_boundary = inst_rc.borrow().error_setter.is_some();
+    if is_boundary {
+        crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
+    }
+    let diff_result = diff_node(&parent_node, &mut rendered, old_rendered.as_ref(), &ns);
+    if is_boundary {
+        crate::hooks::pop_boundary();
+    }
+
+    match diff_result {
+        Ok(_) => { inst_rc.borrow_mut().last_vnode = Some(rendered); }
+        Err(e) => {
+            crate::console_error!("[micro-react] re-render failed: {:?}", e);
+        }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// diff_children — Preact skew algorithm
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── diff_children — Preact skew algorithm ───
 
 pub fn diff_children(
     parent_dom: &Node,
@@ -395,14 +449,8 @@ pub fn diff_children(
         if idx >= 0 {
             matched[idx as usize] = true;
         }
-        // Only host elements (tag strings) and text nodes are single,
-        // directly-insertable DOM nodes. Function components have no DOM
-        // node of their own, and Fragments/Portals represent *multiple*
-        // independent top-level nodes -- flagging them for direct insertion
-        // makes the insert step below move only their borrowed "first
-        // child" stand-in dom, yanking it away from its already-correctly-
-        // placed siblings (mirrors the JS reconciler's exclusion of
-        // function/symbol-typed children here).
+        // Only host elements and text nodes are single, directly-insertable
+        // DOM nodes; components/fragments/portals are excluded (mirrors the JS reconciler).
         let is_insertable = matches!(cv.inner, VNodeInner::Element { .. } | VNodeInner::Text(_));
 
         let is_mounting = idx < 0;
@@ -434,22 +482,8 @@ pub fn diff_children(
 
         let result_dom = diff_node(parent_dom, cv, old_vn, ns)?;
 
-        // The skew algorithm above only flags FLAG_INSERT for vnodes that
-        // were *directly* host Elements/Text before diffing — Component
-        // (and Fragment/Portal) wrappers are excluded there because their
-        // pre-diff shape doesn't reflect what they actually render to.
-        //
-        // But a Component's rendered output is only ever attached to the
-        // DOM by *this* loop (diff_element / diff_component never insert
-        // anything themselves — they just record `_dom`). So if we only
-        // trust the pre-diff FLAG_INSERT, a Component child's freshly
-        // created DOM node is built but never appended anywhere, leaving
-        // the page blank. To fix this without re-introducing the
-        // "move only the fragment's stand-in first child" bug the original
-        // exclusion was guarding against, decide insertion from the
-        // *post-diff* reality: insert/move whenever the node produced isn't
-        // already attached under `parent_dom`, in addition to the explicit
-        // skew-reorder flag.
+        // Components are excluded from pre-diff FLAG_INSERT since their shape
+        // doesn't reflect what they render; use post-diff attachment instead.
         let already_attached = cv
             ._dom
             .as_ref()
@@ -479,9 +513,7 @@ pub fn diff_children(
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// find_match — bidirectional search centred on `skewed_index`
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── find_match — bidirectional search centred on `skewed_index` ───
 
 fn find_match(
     new_vn: &VNode,
@@ -518,9 +550,7 @@ fn find_match(
     -1
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// unmount_vnode — run cleanups, detach refs, remove DOM
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── unmount_vnode — run cleanups, detach refs, remove DOM ───
 
 pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
     if let Some(ref_) = vnode_ref(vnode) {
@@ -540,8 +570,23 @@ pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
                 unmount_vnode(child, skip_remove || matches!(&vnode.inner, VNodeInner::Element { .. }));
             }
         }
-        VNodeInner::Component { .. } => {
-            // Component inst cleanup would go here
+        VNodeInner::Component { inst, .. } => {
+            // Take the instance out (not just clone the Rc), so dropping it
+            // here frees the ComponentInst and Weak-holding closures correctly see it as gone.
+            if let Some(inst_rc) = inst.0.borrow_mut().take() {
+                // Run effect cleanups and flip `unmounted` so any
+                // already-queued scheduler entries become no-ops.
+                unmount_inst(&mut inst_rc.borrow_mut());
+
+                // Recurse into what this component last rendered so nested
+                // elements/components get torn down too, not just this component's own top-level DOM.
+                let last_rendered = inst_rc.borrow().last_vnode.clone();
+                if let Some(rendered) = last_rendered {
+                    unmount_vnode(&rendered, true);
+                }
+                // inst_rc drops here, freeing the ComponentInst now that
+                // nothing else needs it synchronously.
+            }
         }
         _ => {}
     }
@@ -562,18 +607,13 @@ fn vnode_ref(vnode: &VNode) -> Option<&NodeRef> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// apply_props — set/remove DOM attributes and event handlers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── apply_props — set/remove DOM attributes and event handlers ───
 
 const BLOCKED_ATTRS: &[&str] = &["srcdoc"];
 const URL_ATTRS: &[&str] = &["href", "src", "action", "formaction", "poster", "data", "cite"];
 const BOOL_ATTRS: &[&str] = &[
-    // NOTE: "checked" is intentionally excluded — it's handled below via
-    // input.set_checked() so the live DOM *property* (not just the
-    // attribute) stays in sync on re-renders. Leaving it in this list
-    // shadowed the dedicated "checked" match arm further down, since this
-    // check runs first.
+    // NOTE: "checked" is intentionally excluded here; it's handled below via
+    // input.set_checked() so the live DOM property stays in sync on re-renders.
     "disabled", "selected", "readonly", "multiple", "autofocus",
     "autoplay", "controls", "loop", "muted", "open", "required", "reversed",
     "hidden",
@@ -637,13 +677,8 @@ fn set_prop(
         return Ok(());
     }
 
-    // style — accepts either a CSS string or a JS style object
-    // (`style={{ fontSize: '1rem', marginTop: '.5rem' }}`, the form used
-    // throughout this app). Previously only PropVal::Str was handled here
-    // (via prop_str), and an object value had already been collapsed to
-    // PropVal::Null upstream besides — both are fixed now: js_val_to_prop_val
-    // preserves the object as PropVal::Js, and here we convert it to real
-    // CSS text (camelCase keys -> kebab-case properties) instead of dropping it.
+    // style — accepts either a CSS string or a JS style object; js_val_to_prop_val
+    // preserves objects as PropVal::Js and we convert them to CSS text (camelCase -> kebab-case) here.
     if key == "style" {
         let el: &web_sys::HtmlElement = dom.unchecked_ref();
         let css_text = match value {
@@ -738,9 +773,7 @@ fn remove_prop(dom: &Element, key: &str, old_val: &PropVal, ns: &str) -> Result<
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Helpers ───
 
 fn prop_str(v: &PropVal) -> String {
     match v {
@@ -751,13 +784,8 @@ fn prop_str(v: &PropVal) -> String {
     }
 }
 
-/// Convert a JS style object (`{ fontSize: '1rem', marginTop: '.5rem' }`)
-/// into a CSS text string (`font-size: 1rem; margin-top: .5rem;`), the way
-/// React does for `style={{...}}`. camelCase keys become kebab-case
-/// properties; numeric values are passed through as-is (callers in this app
-/// only ever use unit-suffixed strings or pixel-implicit numbers, mirroring
-/// React's behavior of treating bare numbers as px for most properties —
-/// kept simple here since this app never relies on the unitless exceptions).
+/// Convert a JS style object (`{ fontSize: '1rem' }`) into CSS text
+/// (`font-size: 1rem;`), the way React does for `style={{...}}`.
 fn js_style_obj_to_css_text(obj: &JsValue) -> String {
     if !obj.is_object() { return String::new(); }
     let o = match obj.dyn_ref::<Object>() {

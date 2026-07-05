@@ -1,17 +1,7 @@
-// ─── micro-react-wasm ────────────────────────────────────────────────────────
+// ─── micro-react-wasm ───
 // A React-like UI runtime written in Rust/WASM.
-//
-// Crate layout:
-//   vnode.rs   – VNode tree + template-cached html!() builder
-//   diff.rs    – reconciler / diff engine
-//   hooks.rs   – useState, useEffect, useMemo, useRef, useContext, …
-//   context.rs – createContext / Provider / Consumer
-//   events.rs  – logical-clock event proxy (Preact-style)
-//   router.rs  – SPA router
-//   render.rs  – createRoot / render
-//   scheduler.rs – microtask-batched dirty queue
-//   bindings.rs  – wasm-bindgen public surface
-// ─────────────────────────────────────────────────────────────────────────────
+// See each module for its role (vnode, diff, hooks, context, events, router, render, scheduler, bindings).
+// ────────────────────────
 
 #![allow(clippy::new_without_default)]
 #![allow(dead_code, unused_variables, unused_imports)]

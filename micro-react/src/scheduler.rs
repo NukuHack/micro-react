@@ -1,31 +1,24 @@
-// ─── scheduler.rs ────────────────────────────────────────────────────────────
-//
-// Microtask-batched rerender scheduler.
-//
-// Architecture mirrors Preact's:
-//   • Components that call setState/dispatch are pushed into DIRTY_QUEUE.
-//   • The first push schedules a microtask via queueMicrotask().
-//   • The microtask flushes the queue depth-first (parents before children).
-//   • Transition updates go into a separate TRANSITION_QUEUE flushed via rAF.
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── scheduler.rs ───
+// Microtask-batched rerender scheduler, architecture mirrors Preact's.
+// setState/dispatch push into DIRTY_QUEUE, flushed depth-first on the next microtask; transitions flush separately via rAF.
+// ────────────────────
 
 use std::{
     cell::RefCell,
+    rc::{Rc, Weak},
 };
 use wasm_bindgen::{prelude::*, JsCast};
 
 use crate::hooks::{ComponentInst, HookSlot};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Thread-local queues (WASM is single-threaded)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Thread-local queues (WASM is single-threaded) ───
 thread_local! {
-    /// Components waiting for a synchronous re-render.
-    static DIRTY_QUEUE: RefCell<Vec<*mut ComponentInst>> = RefCell::new(Vec::new());
+    /// Components waiting for a synchronous re-render. Stored as `Weak`
+    /// since a component may unmount while sitting in the queue.
+    static DIRTY_QUEUE: RefCell<Vec<Weak<RefCell<ComponentInst>>>> = RefCell::new(Vec::new());
 
     /// Components queued for a transition (rendered in rAF).
-    static TRANSITION_QUEUE: RefCell<Vec<*mut ComponentInst>> = RefCell::new(Vec::new());
+    static TRANSITION_QUEUE: RefCell<Vec<Weak<RefCell<ComponentInst>>>> = RefCell::new(Vec::new());
 
     /// True while a microtask flush is already scheduled.
     static FLUSH_PENDING: RefCell<bool> = RefCell::new(false);
@@ -38,43 +31,41 @@ thread_local! {
 
     /// Pending useLayoutEffect callbacks (run synchronously, before paint).
     pub(crate) static PENDING_LAYOUT_EFFECTS: RefCell<Vec<EffectSlot>> = RefCell::new(Vec::new());
+
+    /// Cached microtask-flush callback, built once and reused.
+    static FLUSH_CB: RefCell<Option<js_sys::Function>> = RefCell::new(None);
+
+    /// Cached rAF transition-flush callback, same reasoning as FLUSH_CB.
+    static TRANSITION_CB: RefCell<Option<js_sys::Function>> = RefCell::new(None);
 }
 
-/// An effect slot queued for execution. Carries a pointer back to the
-/// component instance + hook index so the flush step can retrieve the
-/// real pending callback/cleanup that schedule_effect_inner() stored on
-/// the hook itself (see hooks.rs). Earlier this struct tried to carry the
-/// boxed closures directly, but the closures were actually being stashed
-/// on the HookSlot and an *empty* EffectSlot was enqueued, so run_effects()
-/// / run_layout_effects() had nothing to call — effects never fired.
+/// Points back to the component + hook index so a flush can retrieve the
+/// pending callback/cleanup that schedule_effect_inner() stored on the hook.
 pub struct EffectSlot {
-    pub inst: *mut ComponentInst,
+    pub inst: Weak<RefCell<ComponentInst>>,
     pub idx: usize,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public scheduler API
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Public scheduler API ───
 
-/// Mark a component instance as dirty and schedule a flush.
-///
-/// # Safety
-/// `inst` must point to a valid `ComponentInst` that outlives the flush.
-/// In practice, instances are stored in `Rc<RefCell<ComponentInst>>` by the
-/// diff engine, so they are kept alive by the vnode tree.
-pub fn enqueue_render(inst: *mut ComponentInst) {
-    // Safety: single-threaded WASM, no data races possible.
-    let already_dirty = unsafe { (*inst).dirty };
-    let unmounted     = unsafe { (*inst).unmounted };
+/// Mark a component instance as dirty and schedule a flush. Takes a `Weak`
+/// so a setState call after unmount becomes a no-op instead of touching freed memory.
+pub fn enqueue_render(inst: Weak<RefCell<ComponentInst>>) {
+    let Some(rc) = inst.upgrade() else { return };
+
+    let (already_dirty, unmounted) = {
+        let i = rc.borrow();
+        (i.dirty, i.unmounted)
+    };
     if already_dirty || unmounted { return; }
 
-    unsafe { (*inst).dirty = true; }
+    rc.borrow_mut().dirty = true;
 
     let in_transition = IN_TRANSITION.with(|t| *t.borrow());
     if in_transition {
-        TRANSITION_QUEUE.with(|q| q.borrow_mut().push(inst));
+        TRANSITION_QUEUE.with(|q| q.borrow_mut().push(Rc::downgrade(&rc)));
     } else {
-        DIRTY_QUEUE.with(|q| q.borrow_mut().push(inst));
+        DIRTY_QUEUE.with(|q| q.borrow_mut().push(Rc::downgrade(&rc)));
         schedule_flush();
     }
 }
@@ -89,9 +80,7 @@ pub fn enqueue_layout_effect(slot: EffectSlot) {
     PENDING_LAYOUT_EFFECTS.with(|q| q.borrow_mut().push(slot));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal flush machinery
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Internal flush machinery ───
 
 fn schedule_flush() {
     let already = FLUSH_PENDING.with(|f| {
@@ -101,37 +90,62 @@ fn schedule_flush() {
     });
     if already { return; }
 
-    // Queue a microtask via `queueMicrotask()`
-    let cb = Closure::once(|| {
-        FLUSH_PENDING.with(|f| *f.borrow_mut() = false);
-        flush_rerenders();
+    // A one-shot `Closure::once` panics if called twice, which happens
+    // when re-entrant enqueue_render() calls overlap; cache a reusable `Fn` closure instead.
+    let cb = FLUSH_CB.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let closure = Closure::wrap(Box::new(|| {
+                FLUSH_PENDING.with(|f| *f.borrow_mut() = false);
+                flush_rerenders();
+            }) as Box<dyn Fn()>);
+            // Leak intentionally: this closure lives for the app's entire
+            // lifetime and is called repeatedly, never dropped.
+            *slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
+        }
+        slot.as_ref().unwrap().clone()
     });
-    let window = web_sys::window().expect("no window");
-    // queueMicrotask is not in web-sys yet; call via js-sys
-    let fn_ = js_sys::Function::new_no_args(
-        "queueMicrotask(arguments[0])"
-    );
-    let _ = fn_.call1(&JsValue::NULL, cb.as_ref().unchecked_ref::<js_sys::Function>());
-    cb.forget(); // leak is intentional — runs once then drops
+
+    // queueMicrotask is not in web-sys yet; call via js-sys.
+    let fn_ = js_sys::Function::new_no_args("queueMicrotask(arguments[0])");
+    let _ = fn_.call1(&JsValue::NULL, &cb);
 }
 
 pub fn flush_rerenders() {
     // Drain the dirty queue, depth-sorted (parents before children)
     loop {
-        let inst = DIRTY_QUEUE.with(|q| {
+        let rc = DIRTY_QUEUE.with(|q| {
             let mut q = q.borrow_mut();
-            if q.is_empty() { return None; }
-            // Find shallowest (lowest depth)
-            let idx = q.iter().enumerate()
-                .min_by_key(|(_, p)| { let inst: &ComponentInst = unsafe { &**(*p) }; inst.depth })
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            Some(q.swap_remove(idx))
+            // Drop any entries whose component has since unmounted (Weak
+            // that no longer upgrades) before picking the next one to run.
+            loop {
+                if q.is_empty() { return None; }
+                let idx = q.iter().enumerate()
+                    .filter_map(|(i, w)| w.upgrade().map(|rc| (i, rc.borrow().depth)))
+                    .min_by_key(|(_, depth)| *depth)
+                    .map(|(i, _)| i);
+                match idx {
+                    Some(i) => {
+                        let w = q.swap_remove(i);
+                        if let Some(rc) = w.upgrade() { return Some(rc); }
+                        // shouldn't happen (we just upgraded it above), but
+                        // loop again defensively instead of unwrapping.
+                    }
+                    None => {
+                        // Every remaining entry is dead; drop them all.
+                        q.clear();
+                        return None;
+                    }
+                }
+            }
         });
-        let Some(inst) = inst else { break };
-        // Safety: same single-thread guarantee
-        if unsafe { (*inst).dirty && !(*inst).unmounted } {
-            crate::diff::rerender_component(inst);
+        let Some(rc) = rc else { break };
+        let should_render = {
+            let i = rc.borrow();
+            i.dirty && !i.unmounted
+        };
+        if should_render {
+            crate::diff::rerender_component(rc);
         }
     }
 
@@ -141,22 +155,30 @@ pub fn flush_rerenders() {
     // Flush transition queue in a rAF
     let has_transitions = TRANSITION_QUEUE.with(|q| !q.borrow().is_empty());
     if has_transitions {
-        let cb = Closure::once(|| {
-            let insts: Vec<*mut ComponentInst> = TRANSITION_QUEUE.with(|q| {
-                std::mem::take(&mut *q.borrow_mut())
-            });
-            for inst in insts {
-                if unsafe { !(*inst).unmounted } {
-                    unsafe { (*inst).dirty = true; }
-                    crate::diff::rerender_component(inst);
-                }
+        // Same reasoning as FLUSH_CB above: reuse one persistent `Fn` closure.
+        let cb = TRANSITION_CB.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                let closure = Closure::wrap(Box::new(|| {
+                    let insts: Vec<Weak<RefCell<ComponentInst>>> = TRANSITION_QUEUE.with(|q| {
+                        std::mem::take(&mut *q.borrow_mut())
+                    });
+                    for weak in insts {
+                        let Some(rc) = weak.upgrade() else { continue };
+                        if !rc.borrow().unmounted {
+                            rc.borrow_mut().dirty = true;
+                            crate::diff::rerender_component(rc);
+                        }
+                    }
+                    run_layout_effects();
+                    run_effects();
+                }) as Box<dyn Fn()>);
+                *slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
             }
-            run_layout_effects();
-            run_effects();
+            slot.as_ref().unwrap().clone()
         });
         let window = web_sys::window().expect("no window");
-        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
-        cb.forget();
+        let _ = window.request_animation_frame(&cb);
     }
 }
 
@@ -178,22 +200,16 @@ pub fn run_effects() {
     }
 }
 
-/// Run the cleanup + pending callback stored on hooks[idx] of `inst`,
-/// then store whatever cleanup the callback returned back onto the hook.
-///
-/// # Safety
-/// `inst` must still be a live ComponentInst (true for the lifetime of a
-/// mounted component — the same assumption already relied on by
-/// `enqueue_render`'s use of a raw `*mut ComponentInst` across a
-/// microtask boundary).
-fn run_one_effect(inst: *mut ComponentInst, idx: usize, is_layout: bool) {
-    unsafe {
-        if (*inst).unmounted { return; }
+/// Run the cleanup + pending callback on hooks[idx], then store the
+/// returned cleanup back. `inst` is `Weak` since the component may have unmounted by the time this runs.
+fn run_one_effect(inst: Weak<RefCell<ComponentInst>>, idx: usize, is_layout: bool) {
+    let Some(rc) = inst.upgrade() else { return };
+    if rc.borrow().unmounted { return; }
 
-        let hooks: &mut Vec<HookSlot> = &mut (*inst).hooks;
-        if idx >= hooks.len() { return; }
-
-        let (old_cleanup, pending) = match &mut hooks[idx] {
+    let (old_cleanup, pending) = {
+        let mut i = rc.borrow_mut();
+        if idx >= i.hooks.len() { return; }
+        match &mut i.hooks[idx] {
             HookSlot::Effect { cleanup, pending, .. } if !is_layout => {
                 (cleanup.take(), pending.take())
             }
@@ -201,18 +217,22 @@ fn run_one_effect(inst: *mut ComponentInst, idx: usize, is_layout: bool) {
                 (cleanup.take(), pending.take())
             }
             _ => (None, None),
-        };
-
-        if let Some(c) = old_cleanup {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(c));
         }
+    };
 
-        if let Some(p) = pending {
-            let new_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(p))
-                .ok()
-                .flatten();
-            let hooks: &mut Vec<HookSlot> = &mut (*inst).hooks;
-            match &mut hooks[idx] {
+    if let Some(c) = old_cleanup {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(c));
+    }
+
+    if let Some(p) = pending {
+        let new_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(p))
+            .ok()
+            .flatten();
+        // Still holding `rc`, so the instance can't be freed, but the hook
+        // slot could be reset by a re-entrant render; re-check the index.
+        let mut i = rc.borrow_mut();
+        if idx < i.hooks.len() {
+            match &mut i.hooks[idx] {
                 HookSlot::Effect { cleanup, .. } if !is_layout => { *cleanup = new_cleanup; }
                 HookSlot::LayoutEffect { cleanup, .. } if is_layout => { *cleanup = new_cleanup; }
                 _ => {}

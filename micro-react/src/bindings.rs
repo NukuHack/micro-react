@@ -13,15 +13,13 @@ use std::rc::Rc;
 use crate::vnode::{VNode, VNodeInner, PropVal, JsCallback, ComponentFn, Props, NodeRef};
 use crate::render::Root;
 use crate::hooks::{
-    use_state, use_state_fn, use_reducer, use_effect_nodrop, use_layout_effect,
+    use_state, use_state_fn, use_state_cell, use_reducer, use_effect_nodrop, use_layout_effect,
     use_ref, use_memo, use_callback, use_id, DepVal, ComponentInst, with_inst, current_inst,
 };
 use crate::scheduler::{flush_sync as rs_flush_sync, start_transition as rs_start_transition, enqueue_render};
 use crate::context::{Context, use_context};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Root handle (JS-visible)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Root handle (JS-visible) ───
 
 #[wasm_bindgen]
 pub struct JsRoot {
@@ -57,9 +55,7 @@ pub fn render(vnode: JsValue, container: Element) -> Result<JsRoot, JsValue> {
     Ok(JsRoot { inner: RefCell::new(root) })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// createElement
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── createElement ───
 
 #[wasm_bindgen(js_name = createElement)]
 pub fn create_element(
@@ -67,19 +63,8 @@ pub fn create_element(
     props: &JsValue,
     children: JsValue,
 ) -> Result<JsValue, JsValue> {
-    // `children` arrives here as whatever the JS caller passed as the 3rd
-    // positional argument. wasm-bindgen-generated export shims have fixed
-    // arity (exactly the 3 declared params), so a JS-side variadic call like
-    // `createElement(type, props, child1, child2, child3)` (the React-style
-    // calling convention script.js/the JS API use, collecting via `...args`)
-    // silently truncates to just `child1` at this boundary — args 4+ never
-    // reach wasm at all. That can only be fixed where the call is made (see
-    // the `h` wrapper in index.html, which must bundle children into a real
-    // array before calling in). Here we just make sure that a single
-    // non-array child (e.g. `createElement('h1', null, 'text')`, or the
-    // already-truncated single-arg case before that JS fix lands) isn't
-    // silently dropped on the floor by treating any non-null/undefined,
-    // non-array value as a one-element children array.
+    // wasm-bindgen export shims have fixed arity, so a variadic JS call
+    // truncates children after the 1st (fixed in the `h` wrapper). Here just treat any lone non-array value as a one-element children array.
     let children: Array = match children.dyn_into::<Array>() {
         Ok(arr) => arr,
         Err(orig) => {
@@ -94,13 +79,25 @@ pub fn create_element(
     };
     let children: &Array = &children;
     let key = if props.is_object() {
-        Reflect::get(props, &"key".into()).ok().and_then(|v| v.as_string())
+        Reflect::get(props, &"key".into()).ok().and_then(|v| {
+            // `.as_string()` alone would drop numeric/boolean keys to "no key",
+            // breaking keyed reconciliation; stringify any primitive key type, matching JS/React's own coercion.
+            if v.is_undefined() || v.is_null() {
+                None
+            } else if let Some(s) = v.as_string() {
+                Some(s)
+            } else if let Some(n) = v.as_f64() {
+                Some(n.to_string())
+            } else if let Some(b) = v.as_bool() {
+                Some(b.to_string())
+            } else {
+                None
+            }
+        })
     } else { None };
 
-    // `ref` used to be silently dropped here, so `useRef`/callback refs never
-    // received the live DOM node. Extract it and turn it into a NodeRef whose
-    // `sync` callback writes back into the JS ref object (or calls the
-    // callback-ref function) — see `js_ref_to_node_ref` below.
+    // Extract `ref` and turn it into a NodeRef whose `sync` callback writes
+    // back into the JS ref object (or calls the callback-ref function).
     let node_ref: Option<NodeRef> = if props.is_object() {
         Reflect::get(props, &"ref".into()).ok().and_then(|v| js_ref_to_node_ref(&v))
     } else { None };
@@ -159,7 +156,17 @@ pub fn create_element(
                 }
                 match fn_.call1(&JsValue::NULL, &js_props) {
                     Ok(result) => js_to_vnode(&result).unwrap_or_else(|_| VNode::null()),
-                    Err(_) => VNode::null(),
+                    Err(err) => {
+                        // Report the throw up the active boundary stack so a
+                        // wrapping ErrorBoundary can render its fallback; else fall back to logging + silent null.
+                        if !crate::hooks::report_to_nearest_boundary(err.clone()) {
+                            crate::console_error!(
+                                "[micro-react] uncaught error in component render: {}",
+                                js_sys::JsString::from(err)
+                            );
+                        }
+                        VNode::null()
+                    }
                 }
             }),
             rust_props,
@@ -171,10 +178,8 @@ pub fn create_element(
     vnode_to_js(vnode)
 }
 
-/// Convert a JS `ref` value — either a callback function `(node) => {}` or a
-/// ref object `{ current }` (the shape returned by `useRef`) — into a
+/// Convert a JS `ref` (callback function or `{ current }` object) into a
 /// `NodeRef` whose `sync` callback keeps it updated with the live DOM node.
-/// Returns `None` for `null`/`undefined`/anything else.
 fn js_ref_to_node_ref(ref_val: &JsValue) -> Option<NodeRef> {
     if ref_val.is_null() || ref_val.is_undefined() { return None; }
 
@@ -197,9 +202,7 @@ fn js_ref_to_node_ref(ref_val: &JsValue) -> Option<NodeRef> {
     None
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Fragment symbol (JS-visible)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Fragment symbol (JS-visible) ───
 
 /// Returns the Symbol used as the Fragment type.
 #[wasm_bindgen(js_name = getFragment)]
@@ -207,9 +210,7 @@ pub fn get_fragment() -> JsValue {
     js_sys::Symbol::for_("MicroReact.Fragment").into()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Scheduler exports
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Scheduler exports ───
 
 #[wasm_bindgen(js_name = flushSync)]
 pub fn flush_sync(f: &Function) -> Result<(), JsValue> {
@@ -223,42 +224,25 @@ pub fn start_transition(f: &Function) -> Result<(), JsValue> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Hooks  — exposed as bare wasm-bindgen functions
-//
-// Strategy: hooks must be called from inside a JS component function that was
-// invoked from Rust's diffComponent path (which sets CURRENT_INST).  Each JS
-// hook binding just delegates to the Rust implementation.
-//
-// For JS we wrap the Rust `use_state` in a thin binding that:
-//   1. calls Rust use_state<JsValue>
-//   2. returns a JS Array [value, setter]
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Hooks — exposed as bare wasm-bindgen functions ───
+// Each JS hook binding delegates to the Rust implementation, called from a JS component invoked via Rust's diffComponent path (which sets CURRENT_INST).
 
-/// `useState(initialValue)` — returns `[value, setter]`.
-/// Supports both `setState(value)` and `setState(prev => next)` functional
-/// updaters by keeping a shared cell of the current value alongside the hook
-/// slot, so the updater function always sees the latest state.
+/// `useState(initialValue)` — returns `[value, setter]`. Supports functional
+/// updaters (`setState(prev => next)`), read against the hook's live cell at call time, not a stale snapshot.
 #[wasm_bindgen(js_name = useState)]
 pub fn js_use_state(initial: JsValue) -> Array {
-    let shared: Rc<RefCell<JsValue>> = Rc::new(RefCell::new(initial.clone()));
-    let shared_init = shared.clone();
-
-    let (value, setter) = use_state::<JsValue>(initial);
-    // Keep the shared cell in sync with the latest committed value.
-    *shared_init.borrow_mut() = value.clone();
+    let (value, cell, setter) = use_state_cell(initial);
 
     let setter_fn = {
-        let shared = shared.clone();
+        let cell = cell.clone();
         Closure::wrap(Box::new(move |next: JsValue| {
             let resolved = if next.is_function() {
                 let f: Function = next.unchecked_ref::<Function>().clone();
-                let cur = shared.borrow().clone();
+                let cur = cell.borrow().downcast_ref::<JsValue>().cloned().unwrap_or(JsValue::UNDEFINED);
                 f.call1(&JsValue::NULL, &cur).unwrap_or(JsValue::UNDEFINED)
             } else {
                 next
             };
-            *shared.borrow_mut() = resolved.clone();
             setter(resolved);
         }) as Box<dyn Fn(JsValue)>)
     };
@@ -271,29 +255,21 @@ pub fn js_use_state(initial: JsValue) -> Array {
 }
 
 /// `useState(initialValue)` — full version with functional updater support.
-/// Returns `[value, setter]` where setter accepts either a value or `v => v` function.
+/// Used internally by ErrorBoundary and exposed as `useStateF`; same live-cell reasoning as `js_use_state` above.
 #[wasm_bindgen(js_name = useStateF)]
 pub fn js_use_state_f(initial: JsValue) -> Array {
-    // We store the value in a Rc<RefCell> so functional setters can read current value.
-    let shared: Rc<RefCell<JsValue>> = Rc::new(RefCell::new(initial.clone()));
-    let shared_init = shared.clone();
-
-    let (value, setter) = use_state::<JsValue>(initial);
-    // Keep the shared cell in sync
-    *shared_init.borrow_mut() = value.clone();
+    let (value, cell, setter) = use_state_cell(initial);
 
     let setter_fn = {
-        let shared = shared.clone();
-        let setter = setter.clone();
+        let cell = cell.clone();
         Closure::wrap(Box::new(move |next: JsValue| {
             let resolved = if next.is_function() {
                 let f: Function = next.unchecked_ref::<Function>().clone();
-                let cur = shared.borrow().clone();
+                let cur = cell.borrow().downcast_ref::<JsValue>().cloned().unwrap_or(JsValue::UNDEFINED);
                 f.call1(&JsValue::NULL, &cur).unwrap_or(JsValue::UNDEFINED)
             } else {
                 next
             };
-            *shared.borrow_mut() = resolved.clone();
             setter(resolved);
         }) as Box<dyn Fn(JsValue)>)
     };
@@ -337,14 +313,7 @@ pub fn js_use_reducer(reducer: &Function, initial: JsValue) -> Array {
 }
 
 /// `useEffect(callback, deps?)` — callback returns an optional cleanup function.
-///
-/// Previously the cleanup function returned by `callback` was captured and
-/// then immediately thrown away (`let _ = f;`), so cleanups never ran on
-/// deps-change or unmount — e.g. the Stopwatch demo's
-/// `return () => cancelAnimationFrame(rafRef.current)` never fired, leaking
-/// a new requestAnimationFrame loop every time the effect re-ran. Delegate to
-/// `hooks::use_effect`, which already threads cleanups through correctly
-/// (this mirrors what `useEffectWithCleanup`/`useLayoutEffect` already do).
+/// Delegates to `hooks::use_effect`, which threads the cleanup through correctly on deps-change and unmount.
 #[wasm_bindgen(js_name = useEffect)]
 pub fn js_use_effect(callback: &Function, deps: JsValue) {
     let callback = callback.clone();
@@ -404,15 +373,8 @@ pub fn js_use_layout_effect(callback: &Function, deps: JsValue) {
     );
 }
 
-/// `useRef(initialValue?)` — returns a `{ current: value }` JS object.
-/// The returned object is stable across renders.
-///
-/// Previously this discarded the `use_state` setter (`let (ref_obj, _) = ...`),
-/// so the hook's stored value was never actually updated after the first
-/// render: every render saw `ref_obj` as still `undefined` and manufactured a
-/// *brand new* `{ current }` object, resetting `.current` back to `initial`
-/// and changing the object's identity each time. Persist it like
-/// `useRefStable` does below.
+/// `useRef(initialValue?)` — returns a `{ current: value }` JS object,
+/// stable across renders (persisted via use_state, like useRefStable below).
 #[wasm_bindgen(js_name = useRef)]
 pub fn js_use_ref(initial: JsValue) -> Object {
     let (initialized, set_init) = use_state::<bool>(false);
@@ -478,20 +440,7 @@ pub fn js_use_id() -> String {
     use_id()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Context API
-//
-// Strategy: we can't expose a Rust Context<T> directly to JS because T is
-// generic. Instead we use Context<JsValue> and wrap it in a plain JS object
-// that looks like the JS micro-react context shape:
-//
-//   {
-//     Provider:   JSFunction(({ value, children }) => ...),
-//     Consumer:   JSFunction(({ children }) => children(value)),
-//     useContext: JSFunction(() => currentValue),
-//     _id:        number,
-//   }
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Context API: wraps Context<JsValue> in a plain JS object shaped like { Provider, Consumer, useContext, _id } since T can't cross the JS boundary generically ───
 
 /// `createContext(defaultValue)` — returns a JS context object.
 #[wasm_bindgen(js_name = createContext)]
@@ -546,9 +495,7 @@ pub fn js_create_context(default_value: JsValue) -> Result<JsValue, JsValue> {
     Ok(obj.into())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// memo() HOC
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── memo() HOC ───
 
 /// `memo(Component, compare?)` — wraps a component function to skip re-renders
 /// when props are shallowly equal (or compare() returns true).
@@ -560,7 +507,9 @@ pub fn js_memo(component: &Function, compare: JsValue) -> Result<JsValue, JsValu
     // We leak the previous props into a thread-local via a JS-side WeakMap.
     // Simpler: use a Rust RefCell inside the closure.
     let prev_props: Rc<RefCell<Option<JsValue>>> = Rc::new(RefCell::new(None));
-    let prev_result: Rc<RefCell<Option<JsValue>>> = Rc::new(RefCell::new(None));
+    // Cache the Rust VNode, not the JS-wrapped pointer: js_to_vnode() frees
+    // its backing box, so re-handing the same JsValue out on a cache hit would double-free. Mint a fresh box via vnode_to_js() every return instead.
+    let prev_result: Rc<RefCell<Option<VNode>>> = Rc::new(RefCell::new(None));
 
     let wrapper = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
         let should_skip = if let Some(prev) = prev_props.borrow().as_ref() {
@@ -577,16 +526,23 @@ pub fn js_memo(component: &Function, compare: JsValue) -> Result<JsValue, JsValu
         };
 
         if should_skip {
-            if let Some(res) = prev_result.borrow().as_ref() {
-                return res.clone();
+            if let Some(vn) = prev_result.borrow().as_ref() {
+                // Fresh box every time — never re-hand-out a previously
+                // consumed __ptr.
+                return vnode_to_js(vn.clone()).unwrap_or(JsValue::NULL);
             }
         }
 
         let result = component.call1(&JsValue::NULL, &props)
             .unwrap_or(JsValue::NULL);
         *prev_props.borrow_mut() = Some(props);
-        *prev_result.borrow_mut() = Some(result.clone());
-        result
+        // Consume the freshly-produced JS vnode exactly once here to get an
+        // owned Rust VNode we can safely clone from on future cache hits...
+        let vn = js_to_vnode(&result).unwrap_or_else(|_| VNode::null());
+        *prev_result.borrow_mut() = Some(vn.clone());
+        // ...then re-wrap it in a brand-new box to actually return, since
+        // `result`'s original box has already been freed by js_to_vnode above.
+        vnode_to_js(vn).unwrap_or(JsValue::NULL)
     }) as Box<dyn Fn(JsValue) -> JsValue>);
 
     Ok(wrapper.into_js_value())
@@ -612,9 +568,7 @@ fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {
     true
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// createRef
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── createRef ───
 
 #[wasm_bindgen(js_name = createRef)]
 pub fn js_create_ref() -> Object {
@@ -623,19 +577,46 @@ pub fn js_create_ref() -> Object {
     obj
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ErrorBoundary component factory
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ErrorBoundary component factory ───
 
 /// Returns a JS function component that acts as an error boundary.
 /// Usage: `createElement(ErrorBoundary, { fallback: err => <div>{err.message}</div> }, children)`
 #[wasm_bindgen(js_name = createErrorBoundary)]
 pub fn js_create_error_boundary() -> JsValue {
-    let boundary_fn = Closure::wrap(Box::new(|props: JsValue| -> JsValue {
+    // Re-entrancy guard: js_use_state_f can trigger a synchronous re-render
+    // that re-invokes this closure before the first call returns; skip re-entrant calls and return NULL.
+    let in_progress = Rc::new(RefCell::new(false));
+    let boundary_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
+        if *in_progress.borrow() {
+            return JsValue::NULL;
+        }
+        *in_progress.borrow_mut() = true;
+        let result = js_create_error_boundary_inner(props);
+        *in_progress.borrow_mut() = false;
+        result
+    }) as Box<dyn Fn(JsValue) -> JsValue>);
+
+    boundary_fn.into_js_value()
+}
+
+fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
         // [error, setError] = useState(null)
         let arr = js_use_state_f(JsValue::NULL);
         let error: JsValue = arr.get(0);
         let set_error: JsValue = arr.get(1);
+
+        // Register this render's setError on the instance so a descendant's
+        // failure, discovered long after this closure returns, has somewhere to report (see hooks::report_to_nearest_boundary).
+        {
+            let inst_ptr = crate::hooks::current_inst();
+            let setter_fn = set_error.clone();
+            let rc_setter: Rc<dyn Fn(JsValue)> = Rc::new(move |err: JsValue| {
+                if let Some(f) = setter_fn.dyn_ref::<Function>() {
+                    let _ = f.call1(&JsValue::NULL, &err);
+                }
+            });
+            unsafe { (*inst_ptr).error_setter = Some(rc_setter); }
+        }
 
         if !error.is_null() && !error.is_undefined() {
             crate::console_error!("[micro-react] ErrorBoundary caught: {}", js_sys::JsString::from(error.clone()));
@@ -650,14 +631,9 @@ pub fn js_create_error_boundary() -> JsValue {
 
         // No error: render children
         Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
-    }) as Box<dyn Fn(JsValue) -> JsValue>);
-
-    boundary_fn.into_js_value()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// html tagged-template (improved, template-cached)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── html tagged-template (improved, template-cached) ───
 
 #[wasm_bindgen(js_name = htmlTemplate)]
 pub fn html_template(statics: Array, values: Array) -> Result<JsValue, JsValue> {
@@ -756,9 +732,7 @@ fn is_vnode(v: &JsValue) -> bool {
         .unwrap_or(false)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VNode ↔ JS conversion helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── VNode ↔ JS conversion helpers ───
 
 pub(crate) fn js_to_vnode(v: &JsValue) -> Result<VNode, JsValue> {
     if v.is_null() || v.is_undefined() { return Ok(VNode::null()); }
@@ -800,10 +774,8 @@ pub(crate) fn vnode_to_js(vnode: VNode) -> Result<JsValue, JsValue> {
     Ok(obj.into())
 }
 
-/// Converts collected JSX-style children into the value a JS component sees
-/// on `props.children` — a single vnode-marked object if there's exactly one
-/// child, or an array of them (which `js_to_vnode` already treats as a
-/// fragment) if there are several.
+/// Converts collected JSX-style children into what a JS component sees on
+/// `props.children`: a single vnode if there's one child, else an array (treated as a fragment by `js_to_vnode`).
 fn children_to_js(children: &[VNode]) -> JsValue {
     if children.len() == 1 {
         vnode_to_js(children[0].clone()).unwrap_or(JsValue::NULL)
@@ -861,7 +833,15 @@ fn js_deps_to_rust(deps: &JsValue) -> Option<Vec<DepVal>> {
             if let Some(s) = d.as_string() { DepVal(s) }
             else if let Some(n) = d.as_f64() { DepVal(n.to_string()) }
             else if let Some(b) = d.as_bool() { DepVal(b.to_string()) }
-            else { DepVal("js".to_string()) }
+            else {
+                // Non-primitive deps (arrays/objects) must serialize
+                // structurally, not collapse to a constant "js" string, or memoized values would never recompute when they actually change.
+                js_sys::JSON::stringify(&d)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .map(DepVal)
+                    .unwrap_or_else(|| DepVal("js".to_string()))
+            }
         }).collect();
         Some(v)
     } else {

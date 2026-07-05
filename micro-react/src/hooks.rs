@@ -1,14 +1,12 @@
 // ─── hooks.rs ────────────────────────────────────────────────────────────────
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::{Rc, Weak}};
 use wasm_bindgen::prelude::*;
 
 use crate::scheduler::{enqueue_render, enqueue_effect, enqueue_layout_effect, EffectSlot};
 use crate::vnode::{ComponentFn, Props, VNode};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ComponentInst
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ComponentInst ───
 pub struct ComponentInst {
     pub hooks: Vec<HookSlot>,
     pub hook_idx: usize,
@@ -16,13 +14,9 @@ pub struct ComponentInst {
     pub unmounted: bool,
     pub depth: u32,
     pub parent_dom: Option<web_sys::Element>,
-    pub error_setter: Option<Box<dyn Fn(JsValue)>>,
+    pub error_setter: Option<Rc<dyn Fn(JsValue)>>,
 
-    // ── Re-render bookkeeping ──────────────────────────────────────────────
-    // Everything a future setState-triggered re-render needs in order to
-    // actually re-invoke the component and patch the DOM in place, rather
-    // than just resetting hooks and doing nothing (which was the previous,
-    // incomplete behavior).
+    // ── Re-render bookkeeping: what a setState-triggered re-render needs to actually re-invoke and patch, not just reset hooks ──
     /// The component's render closure, captured at (re)mount time.
     pub render_fn: Option<ComponentFn>,
     /// Props from the most recent render (re-renders triggered by this
@@ -57,9 +51,7 @@ impl ComponentInst {
     pub fn reset_hooks(&mut self) { self.hook_idx = 0; }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HookSlot
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── HookSlot ───
 pub enum HookSlot {
     State   { value: Rc<RefCell<Box<dyn std::any::Any>>> },
     Reducer { value: Rc<RefCell<Box<dyn std::any::Any>>> },
@@ -86,23 +78,74 @@ impl DepVal {
     pub fn js(_v: &JsValue) -> Self { DepVal("js".to_string()) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Current component (thread-local dispatcher)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Current component (thread-local dispatcher) ───
 thread_local! {
     pub(crate) static CURRENT_INST: RefCell<Option<*mut ComponentInst>> = RefCell::new(None);
+    // Weak handle to the same instance as CURRENT_INST. Anything that
+    // outlives the render (closures, effects) must upgrade() this instead of dereferencing the raw pointer.
+    pub(crate) static CURRENT_WEAK: RefCell<Option<Weak<RefCell<ComponentInst>>>> = RefCell::new(None);
 }
 
 pub fn current_inst() -> *mut ComponentInst {
     CURRENT_INST.with(|c| c.borrow().expect("hook called outside component"))
 }
 
-pub fn with_inst<R>(inst: *mut ComponentInst, f: impl FnOnce() -> R) -> R {
+/// A `Weak` handle to the component instance currently rendering. Use this
+/// instead of `current_inst()` in closures that outlive the render call.
+pub fn current_weak() -> Weak<RefCell<ComponentInst>> {
+    CURRENT_WEAK.with(|c| c.borrow().clone().expect("hook called outside component"))
+}
+
+pub fn with_inst<R>(
+    inst: *mut ComponentInst,
+    weak: Weak<RefCell<ComponentInst>>,
+    f: impl FnOnce() -> R,
+) -> R {
     let prev = CURRENT_INST.with(|c| *c.borrow());
+    let prev_weak = CURRENT_WEAK.with(|c| c.borrow().clone());
     CURRENT_INST.with(|c| *c.borrow_mut() = Some(inst));
+    CURRENT_WEAK.with(|c| *c.borrow_mut() = Some(weak));
     let result = f();
     CURRENT_INST.with(|c| *c.borrow_mut() = prev);
+    CURRENT_WEAK.with(|c| *c.borrow_mut() = prev_weak);
     result
+}
+
+// ─── Error boundary stack: tracks currently-rendering ErrorBoundary instances (innermost last) ───
+thread_local! {
+    static BOUNDARY_STACK: RefCell<Vec<Weak<RefCell<ComponentInst>>>> = RefCell::new(Vec::new());
+}
+
+pub fn push_boundary(inst: Weak<RefCell<ComponentInst>>) {
+    BOUNDARY_STACK.with(|s| s.borrow_mut().push(inst));
+}
+
+pub fn pop_boundary() {
+    BOUNDARY_STACK.with(|s| { s.borrow_mut().pop(); });
+}
+
+/// Hand a render failure to the nearest live ErrorBoundary ancestor.
+/// Returns true if a boundary accepted it, false if the caller should fall back to logging.
+pub fn report_to_nearest_boundary(err: JsValue) -> bool {
+    // Collect the setter and drop the BOUNDARY_STACK borrow before calling
+    // it, since the re-render it triggers may re-entrantly push/pop the stack.
+    let setter = BOUNDARY_STACK.with(|s| {
+        for weak in s.borrow().iter().rev() {
+            if let Some(inst_rc) = weak.upgrade() {
+                // Same reasoning, one level in: clone the setter out before calling it.
+                let setter = inst_rc.borrow().error_setter.clone();
+                if setter.is_some() {
+                    return setter;
+                }
+            }
+        }
+        None
+    });
+
+    match setter {
+        Some(setter) => { setter(err); true }
+        None => false,
+    }
 }
 
 // ─── helper: get &hooks safely through raw ptr ───────────────────────────────
@@ -129,9 +172,7 @@ macro_rules! hooks_len {
     ($inst:expr) => { unsafe { (*$inst).hooks.len() } }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useState
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useState ───
 pub fn use_state<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(T)>) {
     let inst = current_inst();
     let idx  = hook_idx!(inst);
@@ -149,17 +190,18 @@ pub fn use_state<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(T)>) {
 
     let current = value_rc.borrow().downcast_ref::<T>().expect("state type mismatch").clone();
 
+    // Capture a Weak, not the raw pointer: this setter is often stashed in
+    // handlers/timers that may fire after the component has unmounted.
+    let weak = current_weak();
     let setter: Rc<dyn Fn(T)> = Rc::new(move |next: T| {
         *value_rc.borrow_mut() = Box::new(next);
-        enqueue_render(inst);
+        enqueue_render(weak.clone());
     });
 
     (current, setter)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useState with functional updater
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useState with functional updater ───
 pub fn use_state_fn<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(Box<dyn FnOnce(T) -> T>)>) {
     let inst = current_inst();
     let idx  = hook_idx!(inst);
@@ -177,19 +219,48 @@ pub fn use_state_fn<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(Box<dyn FnO
 
     let current = value_rc.borrow().downcast_ref::<T>().unwrap().clone();
 
+    let weak = current_weak();
     let setter: Rc<dyn Fn(Box<dyn FnOnce(T) -> T>)> = Rc::new(move |f: Box<dyn FnOnce(T) -> T>| {
         let old  = value_rc.borrow().downcast_ref::<T>().unwrap().clone();
         let next = f(old);
         *value_rc.borrow_mut() = Box::new(next);
-        enqueue_render(inst);
+        enqueue_render(weak.clone());
     });
 
     (current, setter)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useReducer
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useState — cell-exposing variant: returns the hook's live cell so JS functional updates resolve against current value, not a stale snapshot ───
+pub fn use_state_cell<T: Clone + 'static>(
+    initial: T,
+) -> (T, Rc<RefCell<Box<dyn std::any::Any>>>, Rc<dyn Fn(T)>) {
+    let inst = current_inst();
+    let idx  = hook_idx!(inst);
+    hook_idx_inc!(inst);
+
+    if hooks_len!(inst) <= idx {
+        let val: Box<dyn std::any::Any> = Box::new(initial);
+        hooks_push!(inst, HookSlot::State { value: Rc::new(RefCell::new(val)) });
+    }
+
+    let value_rc = match &hooks_ref!(inst)[idx] {
+        HookSlot::State { value } => value.clone(),
+        _ => panic!("hook type mismatch at {}", idx),
+    };
+
+    let current = value_rc.borrow().downcast_ref::<T>().expect("state type mismatch").clone();
+
+    let weak = current_weak();
+    let cell_for_setter = value_rc.clone();
+    let setter: Rc<dyn Fn(T)> = Rc::new(move |next: T| {
+        *cell_for_setter.borrow_mut() = Box::new(next);
+        enqueue_render(weak.clone());
+    });
+
+    (current, value_rc, setter)
+}
+
+// ─── useReducer ───
 pub fn use_reducer<S, A>(
     reducer: impl Fn(S, A) -> S + 'static,
     initial: S,
@@ -213,19 +284,18 @@ where S: Clone + 'static, A: 'static
     let current  = value_rc.borrow().downcast_ref::<S>().unwrap().clone();
     let reducer  = Rc::new(reducer);
 
+    let weak = current_weak();
     let dispatch: Rc<dyn Fn(A)> = Rc::new(move |action: A| {
         let old  = value_rc.borrow().downcast_ref::<S>().unwrap().clone();
         let next = reducer(old, action);
         *value_rc.borrow_mut() = Box::new(next);
-        enqueue_render(inst);
+        enqueue_render(weak.clone());
     });
 
     (current, dispatch)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useEffect / useLayoutEffect (shared inner)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useEffect / useLayoutEffect (shared inner) ───
 fn schedule_effect_inner(
     is_layout: bool,
     callback: Box<dyn FnOnce() -> Option<Box<dyn FnOnce()>>>,
@@ -260,16 +330,19 @@ fn schedule_effect_inner(
 
     // SAFETY: single-threaded WASM, inst outlives this borrow
     let slot = unsafe { hooks_get_mut(inst, idx) };
+    // Effects run later, so the slot must carry a Weak: the component may
+    // have unmounted (and its ComponentInst freed) by the time this runs.
+    let weak = current_weak();
     match slot {
         HookSlot::Effect { deps: d, pending: p, .. } => {
             *d = deps;
             *p = Some(callback);
-            enqueue_effect(EffectSlot { inst, idx });
+            enqueue_effect(EffectSlot { inst: weak, idx });
         }
         HookSlot::LayoutEffect { deps: d, pending: p, .. } => {
             *d = deps;
             *p = Some(callback);
-            enqueue_layout_effect(EffectSlot { inst, idx });
+            enqueue_layout_effect(EffectSlot { inst: weak, idx });
         }
         _ => {}
     }
@@ -302,9 +375,7 @@ pub fn use_layout_effect(
     schedule_effect_inner(true, boxed, deps);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useRef
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useRef ───
 pub fn use_ref() -> crate::vnode::NodeRef {
     let inst = current_inst();
     let idx  = hook_idx!(inst);
@@ -320,9 +391,7 @@ pub fn use_ref() -> crate::vnode::NodeRef {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useMemo / useCallback
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useMemo / useCallback ───
 pub fn use_memo<T: Clone + 'static>(
     factory: impl FnOnce() -> T,
     deps: Option<Vec<DepVal>>,
@@ -365,9 +434,7 @@ pub fn use_callback<F: Clone + 'static>(f: F, deps: Option<Vec<DepVal>>) -> F {
     use_memo(move || f, deps)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useId
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useId ───
 static ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn use_id() -> String {
@@ -386,9 +453,7 @@ pub fn use_id() -> String {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// useDeferredValue
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── useDeferredValue ───
 pub fn use_deferred_value<T: Clone + PartialEq + 'static>(value: T) -> T {
     let (deferred, set) = use_state(value.clone());
     use_effect_nodrop({
@@ -400,9 +465,7 @@ pub fn use_deferred_value<T: Clone + PartialEq + 'static>(value: T) -> T {
     deferred
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Unmount — run all effect cleanups
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Unmount — run all effect cleanups ───
 pub fn unmount_inst(inst: &mut ComponentInst) {
     inst.unmounted = true;
     for slot in &mut inst.hooks {

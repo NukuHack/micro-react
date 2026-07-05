@@ -1,28 +1,8 @@
-// ─── vnode.rs ────────────────────────────────────────────────────────────────
-//
-// The heart of the "nicer html()" improvement:
-//
-//  OLD (JS):  html`<div class=${cls}>${name}</div>`
-//    → Runs DOMParser on the full string every render.
-//
-//  NEW (Rust): "div".tag().class(cls).child(text(name))
-//            or the html!() macro (compile-time safe, zero re-parse):
-//              html!("<div class={cls}>{name}</div>", cls=cls, name=name)
-//
-//  The key insight: a Template stores only the STATIC skeleton of the
-//  element (tag + static attr names).  The DYNAMIC holes (values) are kept
-//  separate as a `Vec<Hole>`.  On re-render we walk the hole list and patch
-//  only those values — no re-parsing, no full string comparison.
-//
-//  Builder API (fluent):
-//    VNode::tag("div")
-//      .attr("id", "app")
-//      .class("container")
-//      .on("click", handler)
-//      .child(VNode::text("hello"))
-//      .child(other_vnode)
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── vnode.rs ───
+// VNode tree + template-cached html!() builder.
+// A Template stores only the static skeleton (tag + static attrs); dynamic
+// holes are patched on re-render without re-parsing. Also exposes a fluent VNode::tag() builder API.
+// ────────────────
 
 use std::{
     collections::HashMap,
@@ -38,9 +18,7 @@ pub fn next_id() -> u64 {
     VNODE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Prop value — can hold strings, booleans, numbers, or JS callbacks
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Prop value — can hold strings, booleans, numbers, or JS callbacks ───
 #[derive(Clone, Debug)]
 pub enum PropVal {
     Str(String),
@@ -48,12 +26,7 @@ pub enum PropVal {
     Num(f64),
     Callback(JsCallback),
     /// Any JS value that isn't a primitive/function/null — plain objects
-    /// (`style={{...}}`, `routes={{...}}`) and arrays. Previously these had
-    /// no representation here and silently collapsed to `Null` wherever a
-    /// prop got normalized into `Props` (every Component call goes through
-    /// this), which is why e.g. `<Router routes={{...}}>` always lost its
-    /// `routes` object and fell back to "404 Not Found", and why
-    /// `style={{...}}` objects were silently dropped.
+    /// (`style={{...}}`, `routes={{...}}`) and arrays.
     Js(JsValue),
     Null,
 }
@@ -110,20 +83,7 @@ impl From<&js_sys::Function> for JsCallback {
     fn from(f: &js_sys::Function) -> Self { JsCallback(f.clone()) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Template — the STATIC part of an element definition
-//
-// A Template is interned at the call site (via a global HashMap keyed on
-// template_id) so identical html!() invocations share one parsed skeleton.
-//
-// Fields:
-//   tag          – element tag name, e.g. "div"
-//   static_attrs – attribute names whose VALUES are also static, stored inline
-//   hole_names   – attribute names for DYNAMIC holes, in order
-//   static_class – space-joined static class tokens
-//   has_key      – true if key={…} hole is present
-//   ns           – optional namespace override ("svg", "math")
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Template — the static part of an element definition, interned per call site so identical html!() calls share one skeleton ───
 #[derive(Clone, Debug, PartialEq)]
 pub struct Template {
     /// Stable id: address of the static string literal (or a hash).
@@ -153,9 +113,7 @@ impl Template {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Props — a thin ordered map
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Props — a thin ordered map ───
 pub type Props = Vec<(String, PropVal)>;
 pub type Key   = Option<String>;
 
@@ -163,9 +121,7 @@ pub fn props_get<'a>(props: &'a Props, key: &str) -> Option<&'a PropVal> {
     props.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Children helper (mirrors React.Children)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Children helper (mirrors React.Children) ───
 #[derive(Clone, Debug)]
 pub struct Children(pub Vec<VNode>);
 
@@ -180,9 +136,7 @@ impl Children {
     pub fn is_empty(&self) -> bool { self.0.is_empty() }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VNodeInner — the discriminated union
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── VNodeInner — the discriminated union ───
 #[derive(Clone, Debug)]
 pub enum VNodeInner {
     /// Plain DOM element: <tag props…>children</tag>
@@ -211,11 +165,8 @@ pub enum VNodeInner {
         render: ComponentFn,
         props: Props,
         key: Key,
-        /// Holds the live `ComponentInst` once this vnode has been mounted,
-        /// so that the *next* render (matched against this vnode as the old
-        /// vnode) can find and reuse the same instance instead of starting
-        /// fresh — this is what lets hooks (state, refs, effects) survive
-        /// across re-renders.
+        /// Holds the live `ComponentInst` once mounted, so the next render
+        /// can reuse it instead of starting fresh (lets hooks survive across re-renders).
         inst: ComponentInstSlot,
     },
     /// Portal — render children into a different DOM container.
@@ -227,9 +178,7 @@ pub enum VNodeInner {
     Null,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VNode — the public handle
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── VNode — the public handle ───
 #[derive(Clone, Debug)]
 pub struct VNode {
     pub inner: VNodeInner,
@@ -324,16 +273,7 @@ impl VNode {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NodeRef — a ref object pointing at a live DOM node
-//
-// `sync` is an optional side-channel callback fired whenever the underlying
-// DOM node changes. This is what lets a JS-side ref object (the familiar
-// `{ current }` shape returned by `useRef`) or a callback ref stay in sync
-// with the Rust reconciler: bindings.rs wires a `sync` closure that writes
-// the live DOM node back onto the JS object's `.current` property (or calls
-// the callback ref function) every time `set()` runs.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── NodeRef: a live-DOM-node ref; `sync` keeps a JS-side `{ current }` ref (or callback ref) in sync with the reconciler ───
 #[derive(Clone)]
 pub struct NodeRef {
     pub node: std::rc::Rc<std::cell::RefCell<Option<web_sys::Node>>>,
@@ -366,9 +306,7 @@ impl NodeRef {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ComponentFn — an `Fn(Props) -> VNode` wrapped in Rc so it's Clone
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ComponentFn — an `Fn(Props) -> VNode` wrapped in Rc so it's Clone ───
 #[derive(Clone)]
 pub struct ComponentFn(pub std::rc::Rc<dyn Fn(Props) -> VNode>);
 
@@ -387,11 +325,7 @@ impl ComponentFn {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ComponentInstSlot — interior-mutable handle the diff engine uses to stash
-// (and later retrieve) the live ComponentInst for a Component vnode, so that
-// state/hooks persist across re-renders instead of resetting every time.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ComponentInstSlot: handle the diff engine uses to stash/retrieve a Component vnode's live ComponentInst so hooks persist across re-renders ───
 #[derive(Clone, Default)]
 pub struct ComponentInstSlot(
     pub std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<crate::hooks::ComponentInst>>>>>,
@@ -409,27 +343,8 @@ impl fmt::Debug for ComponentInstSlot {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ElementBuilder — fluent builder that produces a VNode::Element
-//
-// The "nicer html()" experience:
-//
-//   "div".v()
-//     .class("container active")
-//     .id("app")
-//     .attr("data-x", "1")
-//     .on("click", my_handler)
-//     .child(VNode::text("Hello"))
-//     .build()
-//
-// Or with the html!() macro:
-//   html!(<div class="container" onClick={handler}>Hello</div>)
-//
-// The builder accumulates STATIC attrs into the Template and DYNAMIC values
-// into the holes vec.  When the builder is finalized, a template id is
-// registered in the global TEMPLATE_CACHE so the next render with the same
-// shape can skip re-parsing.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ElementBuilder — fluent builder that produces a VNode::Element ───
+// Static attrs go into the Template, dynamic values into holes; finalizing registers a template id so identical shapes skip re-parsing.
 pub struct ElementBuilder {
     template: Template,
     holes: Vec<PropVal>,
@@ -543,9 +458,7 @@ impl From<ElementBuilder> for VNode {
     fn from(b: ElementBuilder) -> VNode { b.build() }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// `IntoVNode` trait — lets `"div".v()` work
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── `IntoVNode` trait — lets `"div".v()` work ───
 pub trait IntoVNode {
     /// Start building an element with this tag name.
     fn v(self) -> ElementBuilder;
@@ -563,46 +476,11 @@ impl IntoVNode for String {
     fn t(self) -> VNode { VNode::text(self) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// html!() macro
-//
-// Parses a JSX-ish template string at COMPILE TIME via a proc-macro-like
-// approach using declarative macros.  The parsed skeleton is cached as a
-// static Template; only hole values change between renders.
-//
-// Syntax:
-//   html!(<div class="static" id={dynamic_id} onClick={handler}>
-//     <span>{"hello"}</span>
-//     {some_vnode}
-//   </div>)
-//
-// Because Rust declarative macros can't do full JSX parsing, we provide
-// two layers:
-//   1. html!() macro for simple single-element cases (no whitespace, one level).
-//   2. The `Template::parse` function for runtime parsing of complex strings
-//      (called by the JS-side html() tagged template in the glue layer).
-//
-// For Rust components, the builder API is cleaner and fully type-safe.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── html!() macro: parses a JSX-ish template at compile time via declarative macros ───
+// The parsed skeleton is cached as a static Template; only hole values change between renders.
 
-/// Lightweight compile-time html macro.
-/// Creates a single VNode element with static + dynamic props.
-///
-/// Examples:
-/// ```rust
-/// // Static element
-/// let node = html!(div class="container" => []);
-///
-/// // Dynamic attr
-/// let node = html!(div class={my_class} id="app" => [
-///     html!(span => [VNode::text("hello")])
-/// ]);
-///
-/// // Event handler
-/// let node = html!(button onClick={onclick_handler} => [
-///     VNode::text("Click me")
-/// ]);
-/// ```
+/// Lightweight compile-time html macro; creates a VNode element with
+/// static + dynamic props, e.g. `html!(div class={cls} => [child])`.
 #[macro_export]
 macro_rules! html {
     // ── Element with children: html!(tag attr=val … => [children…]) ─────────
@@ -632,26 +510,14 @@ macro_rules! html {
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Template::parse — runtime parser for the JS-side html() tagged-template API.
-//
-// Key improvement over the JS version:
-//   • The result is a (Template, initial_holes) pair.
-//   • The Template (static skeleton) is cached by an id derived from the
-//     static string parts — so subsequent renders only re-evaluate the
-//     dynamic expressions, not the whole structure.
-//   • We store the ORIGINAL template string for each element in the vnode,
-//     so a future rework (e.g. server rendering) can reproduce it cheaply.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Template::parse: runtime parser for the JS-side html() tagged-template API ───
+// Returns (Template, initial_holes); the Template is cached by id so later renders only re-evaluate dynamic expressions.
 impl Template {
     /// Parse a JSX-ish string (without dynamic values) into a static Template.
     /// `static_src` must be the concatenation of the tagged-template statics only.
     pub fn parse(static_src: &str) -> Result<Template, String> {
-        // We use a DOMParser via web-sys to parse the HTML skeleton.
-        // Dynamic slots are replaced by unique placeholder attribute values
-        // before parsing, then matched back by index.
-        // This function is only called once per unique template string — the
-        // result is cached in TEMPLATE_REGISTRY.
+        // Parse via DOMParser, with dynamic slots replaced by placeholder
+        // attrs beforehand and matched back by index; cached in TEMPLATE_REGISTRY.
         let window = web_sys::window().ok_or("no window")?;
         let _doc = window.document().ok_or("no document")?;
 
@@ -692,9 +558,7 @@ impl Template {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Global template registry (id → Template)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Global template registry (id → Template) ───
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
