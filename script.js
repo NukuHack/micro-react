@@ -1,6 +1,4 @@
-// ─────────────────────────────────────────────────────────────────
-// THEME CONTEXT
-// ─────────────────────────────────────────────────────────────────
+// ─── THEME CONTEXT ───
 const ThemeCtx = createContext({ name: 'dark', label: 'Dark' });
 const themes = [
   { name: 'dark',  label: '🌑 Dark'  },
@@ -8,9 +6,7 @@ const themes = [
   { name: 'neon',  label: '🟩 Neon'  },
 ];
 
-// ─────────────────────────────────────────────────────────────────
-// NAV
-// ─────────────────────────────────────────────────────────────────
+// ─── NAV ───
 function Nav() {
   const { path } = useLocation();
   return h('nav', null,
@@ -23,9 +19,7 @@ function Nav() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// COUNTER CARD  (useState + useReducer)
-// ─────────────────────────────────────────────────────────────────
+// ─── COUNTER CARD  (useState + useReducer) ───
 function counterReducer(state, action) {
   switch (action.type) {
     case 'INC':   return { ...state, count: state.count + state.step };
@@ -59,9 +53,7 @@ function CounterCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// TODO CARD  (useState + useCallback + useMemo)
-// ─────────────────────────────────────────────────────────────────
+// ─── TODO CARD  (useState + useCallback + useMemo) ───
 let _todoId = 0;
 function TodoCard() {
   const [items, setItems] = useState([
@@ -122,9 +114,7 @@ function TodoCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// TIMER CARD  (useEffect + useRef + useState)
-// ─────────────────────────────────────────────────────────────────
+// ─── TIMER CARD  (useEffect + useRef + useState) ───
 function TimerCard() {
   const [ms, setMs]       = useState(0);
   const [running, setRun] = useState(false);
@@ -167,9 +157,7 @@ function TimerCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// THEME DEMO  (useContext)
-// ─────────────────────────────────────────────────────────────────
+// ─── THEME DEMO  (useContext) ───
 function ThemeCard() {
   const theme  = ThemeCtx.useContext();
   const [, setTheme] = useState(0);
@@ -186,9 +174,7 @@ function ThemeCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// MEMO DEMO
-// ─────────────────────────────────────────────────────────────────
+// ─── MEMO DEMO ───
 const RenderLog = memo(function RenderLog({ logs }) {
   return h('div', { className: 'render-log' },
     ...logs.map((l, i) => h('p', { key: i }, l)),
@@ -224,9 +210,7 @@ function MemoCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// REF CARD  (useRef + useLayoutEffect)
-// ─────────────────────────────────────────────────────────────────
+// ─── REF CARD  (useRef + useLayoutEffect) ───
 function RefCard() {
   const boxRef = useRef(null);
   const [lit, setLit] = useState(false);
@@ -256,9 +240,7 @@ function RefCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// ERROR BOUNDARY CARD
-// ─────────────────────────────────────────────────────────────────
+// ─── ERROR BOUNDARY CARD ───
 function BombComponent({ shouldExplode }) {
   if (shouldExplode) throw new Error('💥 Intentional render error!');
   return h('div', { style: { color: 'var(--green)', fontSize: '.9rem' } },
@@ -296,9 +278,7 @@ function ErrorBoundaryCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// TABS DEMO  (useState + dynamic children)
-// ─────────────────────────────────────────────────────────────────
+// ─── TABS DEMO  (useState + dynamic children) ───
 const tabContent = {
   Events:  () => h('p', null, '🧲 Event delegation via logical-clock proxy. Prevents "click mounts node that immediately receives same click" race (ported from Preact).'),
   Hooks:   () => h('p', null, '🪝 Full hook surface: useState, useReducer, useEffect, useLayoutEffect, useMemo, useCallback, useRef, useId, useTransition, useDeferredValue, useSyncExternalStore, useImperativeHandle.'),
@@ -324,9 +304,7 @@ function TabsCard() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// HOME PAGE
-// ─────────────────────────────────────────────────────────────────
+// ─── HOME PAGE ───
 function HomePage() {
   return h('main', { className: 'page-enter' },
     h('div', { className: 'hero' },
@@ -360,9 +338,7 @@ function HomePage() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// ABOUT PAGE
-// ─────────────────────────────────────────────────────────────────
+// ─── ABOUT PAGE ───
 function AboutPage() {
   const navigate = useNavigate();
 
@@ -415,9 +391,7 @@ render(h(<span class="fn">App</span>), document.getElementById(<span class="str"
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// SHELL  (inside Router, so Nav can use useLocation)
-// ─────────────────────────────────────────────────────────────────
+// ─── SHELL  (inside Router, so Nav can use useLocation) ───
 function Shell({ themeIdx, setThemeIdx }) {
   const { path } = useLocation();
 
@@ -447,9 +421,7 @@ function Shell({ themeIdx, setThemeIdx }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────
-// APP ROOT  (provides theme context + router)
-// ─────────────────────────────────────────────────────────────────
+// ─── APP ROOT  (provides theme context + router) ───
 function App() {
   const [themeIdx, setThemeIdx] = useState(0);
   const theme = themes[themeIdx];
@@ -464,4 +436,5 @@ function App() {
   );
 }
 
-render(h(App), document.getElementById('root'));
+const __root = render(h(App), document.getElementById('root'));
+window.__root = __root;

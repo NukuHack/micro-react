@@ -15,19 +15,13 @@ import initWasm, * as MicroReact from './micro-react/pkg/micro_react.js';
 // Boot WASM (needed so the module is genuinely loaded/used)
 await initWasm();
 
-// Fragment / ErrorBoundary / html aren't plain wasm-bindgen exports (a Symbol
-// and two closures aren't representable as bindgen statics), so they're
-// derived here, once, right after init — no post-build patching required.
+// Fragment / ErrorBoundary / html aren't plain wasm-bindgen exports,
+// so derive them here once, right after init.
 const Fragment = MicroReact.getFragment();
 const ErrorBoundary = MicroReact.createErrorBoundary();
 const html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
-// wasm-bindgen exports have fixed arity — the generated createElement(type,
-// props, children) shim only ever reads its first 3 arguments. script.js
-// calls h(type, props, child1, child2, ...) in the React/JS-API variadic
-// style, so without this wrapper every extra child silently vanishes (and
-// even a single child arrives as a bare value instead of the array Rust
-// expects). Collect the rest params into a real array before crossing into
-// wasm, matching what the pure-JS createElement(type, props, ...args) did.
+// wasm-bindgen's createElement only takes 3 fixed args, so gather the
+// variadic children into an array before crossing into wasm.
 const h = (type, props, ...children) => MicroReact.createElement(type, props, children);
 
 // Make everything available globally
