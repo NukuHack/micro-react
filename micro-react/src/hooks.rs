@@ -16,6 +16,14 @@ pub struct ComponentInst {
     pub parent_dom: Option<web_sys::Element>,
     pub error_setter: Option<Rc<dyn Fn(JsValue)>>,
 
+    /// Bumped at the start of every render of this instance (initial mount,
+    /// rerender_component, or a reentrant render triggered mid-diff by a
+    /// synchronous setState). Used so a render that is still "in flight" when
+    /// a nested/reentrant render for the *same* instance completes can detect
+    /// that it is stale and avoid clobbering the fresher `last_vnode` (etc.)
+    /// the reentrant render just committed. See diff_component / rerender_component.
+    pub render_generation: u64,
+
     // ── Re-render bookkeeping: what a setState-triggered re-render needs to actually re-invoke and patch, not just reset hooks ──
     /// The component's render closure, captured at (re)mount time.
     pub render_fn: Option<ComponentFn>,
@@ -41,6 +49,7 @@ impl ComponentInst {
             depth: 0,
             parent_dom: None,
             error_setter: None,
+            render_generation: 0,
             render_fn: None,
             last_props: Vec::new(),
             last_parent_dom: None,
@@ -261,10 +270,15 @@ pub fn use_state_cell<T: Clone + 'static>(
 }
 
 // ─── useReducer ───
-pub fn use_reducer<S, A>(
+
+/// Cell-exposing variant: returns the hook's live backing cell alongside the
+/// value and dispatcher, same reasoning as `use_state_cell` — lets a caller
+/// (e.g. the JS bindings) key a cache off the cell's stable address instead
+/// of rebuilding a JS-facing wrapper every render.
+pub fn use_reducer_cell<S, A>(
     reducer: impl Fn(S, A) -> S + 'static,
     initial: S,
-) -> (S, Rc<dyn Fn(A)>)
+) -> (S, Rc<RefCell<Box<dyn std::any::Any>>>, Rc<dyn Fn(A)>)
 where S: Clone + 'static, A: 'static
 {
     let inst = current_inst();
@@ -285,13 +299,24 @@ where S: Clone + 'static, A: 'static
     let reducer  = Rc::new(reducer);
 
     let weak = current_weak();
+    let cell_for_dispatch = value_rc.clone();
     let dispatch: Rc<dyn Fn(A)> = Rc::new(move |action: A| {
-        let old  = value_rc.borrow().downcast_ref::<S>().unwrap().clone();
+        let old  = cell_for_dispatch.borrow().downcast_ref::<S>().unwrap().clone();
         let next = reducer(old, action);
-        *value_rc.borrow_mut() = Box::new(next);
+        *cell_for_dispatch.borrow_mut() = Box::new(next);
         enqueue_render(weak.clone());
     });
 
+    (current, value_rc, dispatch)
+}
+
+pub fn use_reducer<S, A>(
+    reducer: impl Fn(S, A) -> S + 'static,
+    initial: S,
+) -> (S, Rc<dyn Fn(A)>)
+where S: Clone + 'static, A: 'static
+{
+    let (current, _cell, dispatch) = use_reducer_cell(reducer, initial);
     (current, dispatch)
 }
 
@@ -475,6 +500,9 @@ pub fn unmount_inst(inst: &mut ComponentInst) {
                 if let Some(f) = cleanup.take() {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
                 }
+            }
+            HookSlot::State { value } | HookSlot::Reducer { value } => {
+                crate::bindings::evict_setter_cache(value);
             }
             _ => {}
         }

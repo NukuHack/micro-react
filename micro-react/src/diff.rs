@@ -314,13 +314,15 @@ fn diff_component(
     // (which is just a stand-in for "did we mount before").
     let old_rendered = inst_rc.borrow().last_vnode.clone();
 
-    {
+    let my_generation = {
         let mut inst = inst_rc.borrow_mut();
         inst.depth = new_vnode._depth;
         inst.parent_dom = parent_dom.clone().dyn_into::<Element>().ok();
         inst.reset_hooks();
         inst.dirty = false;
-    }
+        inst.render_generation += 1;
+        inst.render_generation
+    };
 
     // Raw pointer is only sound for this synchronous call, while inst_rc is
     // alive on the stack. Anything that outlives it captures inst_weak instead.
@@ -350,7 +352,30 @@ fn diff_component(
     if is_boundary {
         crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
     }
-    let dom = diff_node(parent_dom, &mut rendered, old_rendered.as_ref(), ns);
+    // catch_unwind here too: the render call above only protects the user's
+    // render function. The reconciliation that follows (diff_node walking
+    // into this component's rendered subtree, mounting/unmounting children,
+    // touching the DOM) can itself panic — e.g. while tearing down a thrown
+    // child and mounting a fallback in its place — and previously had no
+    // safety net at all, so it would unwind straight out through the
+    // scheduler's microtask callback as an uncaught error instead of being
+    // contained the same way a render-time panic is.
+    let dom = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        diff_node(parent_dom, &mut rendered, old_rendered.as_ref(), ns)
+    })) {
+        Ok(res) => res,
+        Err(e) => {
+            let msg = panic_message(&*e);
+            crate::console_error!("[micro-react] reconciliation panicked: {}", msg);
+            if !crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg)) {
+                crate::console_error!(
+                    "[micro-react] uncaught reconciliation panic (no boundary above): {}",
+                    msg
+                );
+            }
+            Ok(None)
+        }
+    };
     if is_boundary {
         crate::hooks::pop_boundary();
     }
@@ -358,13 +383,25 @@ fn diff_component(
     new_vnode._dom = dom.clone();
 
     // Persist everything a future setState-triggered re-render needs.
+    //
+    // Guard against staleness: diffing this component's own subtree
+    // (diff_node above) can synchronously trigger a *reentrant* re-render of
+    // this same instance — e.g. a child panics, reports to an ErrorBoundary
+    // ancestor via report_to_nearest_boundary/setError, and that setState
+    // flushes synchronously before this outer call unwinds. That reentrant
+    // render already wrote its own (fresher/correct) last_vnode etc. If we
+    // blindly overwrite here with `rendered` (this call's, now-stale, tree),
+    // we'd revert last_vnode to a tree that no longer matches the live DOM,
+    // corrupting the next diff. Only commit if nothing newer has landed.
     {
         let mut inst = inst_rc.borrow_mut();
-        inst.render_fn = Some(render);
-        inst.last_props = props;
-        inst.last_parent_dom = Some(parent_dom.clone());
-        inst.last_ns = ns.to_string();
-        inst.last_vnode = Some(rendered);
+        if inst.render_generation == my_generation {
+            inst.render_fn = Some(render);
+            inst.last_props = props;
+            inst.last_parent_dom = Some(parent_dom.clone());
+            inst.last_ns = ns.to_string();
+            inst.last_vnode = Some(rendered);
+        }
     }
 
     // Stash the (possibly newly-created) instance on the new vnode so the
@@ -379,11 +416,13 @@ fn diff_component(
 // ─── rerender_component — called by the scheduler for dirty instances ───
 
 pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
-    {
+    let my_generation = {
         let mut i = inst_rc.borrow_mut();
         i.dirty = false;
         i.reset_hooks();
-    }
+        i.render_generation += 1;
+        i.render_generation
+    };
 
     let (render_fn, props, parent_node, ns, old_rendered, depth) = {
         let i = inst_rc.borrow();
@@ -413,13 +452,42 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
     if is_boundary {
         crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
     }
-    let diff_result = diff_node(&parent_node, &mut rendered, old_rendered.as_ref(), &ns);
+    // See the matching catch_unwind in diff_component: reconciliation itself
+    // (not just the render call above) needs to be panic-safe. This is the
+    // exact call that runs when an ErrorBoundary's own setError() re-render
+    // swaps its subtree from the thrown children to the fallback UI.
+    let diff_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        diff_node(&parent_node, &mut rendered, old_rendered.as_ref(), &ns)
+    })) {
+        Ok(res) => res,
+        Err(e) => {
+            let msg = panic_message(&*e);
+            crate::console_error!("[micro-react] reconciliation panicked: {}", msg);
+            if !crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg)) {
+                crate::console_error!(
+                    "[micro-react] uncaught reconciliation panic (no boundary above): {}",
+                    msg
+                );
+            }
+            Ok(None)
+        }
+    };
     if is_boundary {
         crate::hooks::pop_boundary();
     }
 
     match diff_result {
-        Ok(_) => { inst_rc.borrow_mut().last_vnode = Some(rendered); }
+        // Same staleness guard as diff_component: diffing this render's
+        // output may have synchronously triggered another reentrant
+        // rerender_component of this same instance (e.g. a child panicked
+        // into an ErrorBoundary's setError). If a newer render already
+        // committed, don't clobber it with this call's now-stale tree.
+        Ok(_) => {
+            let mut inst = inst_rc.borrow_mut();
+            if inst.render_generation == my_generation {
+                inst.last_vnode = Some(rendered);
+            }
+        }
         Err(e) => {
             crate::console_error!("[micro-react] re-render failed: {:?}", e);
         }

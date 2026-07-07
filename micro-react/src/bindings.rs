@@ -13,11 +13,61 @@ use std::rc::Rc;
 use crate::vnode::{VNode, VNodeInner, PropVal, JsCallback, ComponentFn, Props, NodeRef};
 use crate::render::Root;
 use crate::hooks::{
-    use_state, use_state_fn, use_state_cell, use_reducer, use_effect_nodrop, use_layout_effect,
+    use_state, use_state_fn, use_state_cell, use_reducer_cell, use_effect_nodrop, use_layout_effect,
     use_ref, use_memo, use_callback, use_id, DepVal, ComponentInst, with_inst, current_inst,
 };
 use crate::scheduler::{flush_sync as rs_flush_sync, start_transition as rs_start_transition, enqueue_render};
 use crate::context::{Context, use_context};
+
+// ─── Setter-closure cache ───
+//
+// useState/useStateF/useReducer are called on *every* render, but each hook
+// has one stable, persistent backing cell (its `HookSlot`) for the lifetime
+// of the component instance. Previously each of these bindings built a brand
+// new `wasm_bindgen::closure::Closure`, immediately leaked it via
+// `into_js_value()`, and handed out a fresh JS function every single render
+// — so a component that re-renders N times accumulates N independent JS
+// function objects/closures over its lifetime, all wired to write into the
+// same cell. Keyed by the cell's stable address, this cache builds that
+// wrapper exactly once per hook and hands back the same JS function on every
+// subsequent render, matching the pattern already used for FLUSH_CB /
+// TRANSITION_CB in scheduler.rs (see the comments there).
+thread_local! {
+    static SETTER_CACHE: RefCell<std::collections::HashMap<usize, JsValue>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn cell_key(cell: &Rc<RefCell<Box<dyn std::any::Any>>>) -> usize {
+    Rc::as_ptr(cell) as usize
+}
+
+/// Returns the cached JS setter for `cell` if one exists, otherwise builds
+/// it via `build`, caches it, and returns it.
+fn cached_setter(
+    cell: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    build: impl FnOnce() -> JsValue,
+) -> JsValue {
+    let key = cell_key(cell);
+    if let Some(existing) = SETTER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return existing;
+    }
+    let built = build();
+    SETTER_CACHE.with(|c| {
+        c.borrow_mut().insert(key, built.clone());
+    });
+    built
+}
+
+/// Called on unmount so a hook's cached setter doesn't linger forever once
+/// its component is gone, and so a later, unrelated `Rc` allocation that
+/// happens to reuse the same freed address can't accidentally collide with
+/// a stale cache entry.
+pub(crate) fn evict_setter_cache(cell: &Rc<RefCell<Box<dyn std::any::Any>>>) {
+    let key = cell_key(cell);
+    SETTER_CACHE.with(|c| {
+        c.borrow_mut().remove(&key);
+    });
+}
 
 // ─── Root handle (JS-visible) ───
 
@@ -80,8 +130,8 @@ pub fn create_element(
     let children: &Array = &children;
     let key = if props.is_object() {
         Reflect::get(props, &"key".into()).ok().and_then(|v| {
-            // `.as_string()` alone would drop numeric/boolean keys to "no key",
-            // breaking keyed reconciliation; stringify any primitive key type, matching JS/React's own coercion.
+            // `.as_string()` alone would drop numeric/boolean keys to "no
+            // key", breaking keyed reconciliation; stringify any primitive key type, matching JS/React's own coercion.
             if v.is_undefined() || v.is_null() {
                 None
             } else if let Some(s) = v.as_string() {
@@ -233,7 +283,7 @@ pub fn start_transition(f: &Function) -> Result<(), JsValue> {
 pub fn js_use_state(initial: JsValue) -> Array {
     let (value, cell, setter) = use_state_cell(initial);
 
-    let setter_fn = {
+    let js_fn = cached_setter(&cell, || {
         let cell = cell.clone();
         Closure::wrap(Box::new(move |next: JsValue| {
             let resolved = if next.is_function() {
@@ -245,9 +295,9 @@ pub fn js_use_state(initial: JsValue) -> Array {
             };
             setter(resolved);
         }) as Box<dyn Fn(JsValue)>)
-    };
+        .into_js_value()
+    });
 
-    let js_fn = setter_fn.into_js_value();
     let arr = Array::new();
     arr.push(&value);
     arr.push(&js_fn);
@@ -260,7 +310,7 @@ pub fn js_use_state(initial: JsValue) -> Array {
 pub fn js_use_state_f(initial: JsValue) -> Array {
     let (value, cell, setter) = use_state_cell(initial);
 
-    let setter_fn = {
+    let js_fn = cached_setter(&cell, || {
         let cell = cell.clone();
         Closure::wrap(Box::new(move |next: JsValue| {
             let resolved = if next.is_function() {
@@ -272,11 +322,12 @@ pub fn js_use_state_f(initial: JsValue) -> Array {
             };
             setter(resolved);
         }) as Box<dyn Fn(JsValue)>)
-    };
+        .into_js_value()
+    });
 
     let arr = Array::new();
     arr.push(&value);
-    arr.push(&setter_fn.into_js_value());
+    arr.push(&js_fn);
     arr
 }
 
@@ -284,31 +335,26 @@ pub fn js_use_state_f(initial: JsValue) -> Array {
 #[wasm_bindgen(js_name = useReducer)]
 pub fn js_use_reducer(reducer: &Function, initial: JsValue) -> Array {
     let reducer = reducer.clone();
-    let shared: Rc<RefCell<JsValue>> = Rc::new(RefCell::new(initial.clone()));
 
-    let (state, dispatch) = use_reducer::<JsValue, JsValue>(
-        {
-            let reducer = reducer.clone();
-            move |state, action| {
-                reducer.call2(&JsValue::NULL, &state, &action)
-                    .unwrap_or(state)
-            }
+    let (state, cell, dispatch) = use_reducer_cell::<JsValue, JsValue>(
+        move |state, action| {
+            reducer.call2(&JsValue::NULL, &state, &action)
+                .unwrap_or(state)
         },
         initial,
     );
 
-    *shared.borrow_mut() = state.clone();
-
-    let dispatch_fn = {
+    let js_dispatch = cached_setter(&cell, || {
         let dispatch = dispatch.clone();
         Closure::wrap(Box::new(move |action: JsValue| {
             dispatch(action);
         }) as Box<dyn Fn(JsValue)>)
-    };
+        .into_js_value()
+    });
 
     let arr = Array::new();
     arr.push(&state);
-    arr.push(&dispatch_fn.into_js_value());
+    arr.push(&js_dispatch);
     arr
 }
 
@@ -586,14 +632,26 @@ pub fn js_create_error_boundary() -> JsValue {
     // Re-entrancy guard: js_use_state_f can trigger a synchronous re-render
     // that re-invokes this closure before the first call returns; skip re-entrant calls and return NULL.
     let in_progress = Rc::new(RefCell::new(false));
+
+    /// Resets `in_progress` back to false on drop, whether we get there by a
+    /// normal return or by unwinding through a panic. Without this, a panic
+    /// inside `js_create_error_boundary_inner` (or inside a fallback/child
+    /// render it triggers) would skip the plain assignment that used to sit
+    /// at the end of this closure, leaving the guard stuck `true` forever.
+    struct ResetOnDrop(Rc<RefCell<bool>>);
+    impl Drop for ResetOnDrop {
+        fn drop(&mut self) {
+            *self.0.borrow_mut() = false;
+        }
+    }
+
     let boundary_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
         if *in_progress.borrow() {
             return JsValue::NULL;
         }
         *in_progress.borrow_mut() = true;
-        let result = js_create_error_boundary_inner(props);
-        *in_progress.borrow_mut() = false;
-        result
+        let _reset = ResetOnDrop(in_progress.clone());
+        js_create_error_boundary_inner(props)
     }) as Box<dyn Fn(JsValue) -> JsValue>);
 
     boundary_fn.into_js_value()
