@@ -1,15 +1,6 @@
-// ─── diff.rs ─────────────────────────────────────────────────────────────────
-//
-// Reconciler — walks old and new VNode trees, patches the DOM.
-//
-// Algorithm: Preact-style skew diff with keyed matching.
-//
-// Entry points:
-//   diff_node()        – diff a single vnode against its old counterpart
-//   diff_children()    – diff a list of children (skew algorithm)
-//   rerender_component() – re-render a dirty component in place
-//
-// ─────────────────────────────────────────────────────────────────────────────
+// Reconciler: walks old/new VNode trees and patches the DOM using a
+// Preact-style skew diff with keyed matching. Entry points: diff_node(),
+// diff_children(), rerender_component().
 
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{Document, Element, Node, Text};
@@ -248,6 +239,32 @@ fn diff_element(
         }
     };
 
+    let old_was_element = matches!(old_vnode.map(|o| &o.inner), Some(VNodeInner::Element { .. }));
+
+    // Reusing an existing DOM element (matched purely by tag name) whose
+    // previous *vnode* wasn't an Element — e.g. it was actually rendered by
+    // a Component/fallback swap (see ErrorBoundary handling in
+    // report_to_nearest_boundary) — means `old_props` below is empty, even
+    // though the DOM element itself still carries real attributes (inline
+    // style, class, ...) from whatever it previously rendered. apply_props
+    // only removes attributes it's told were in `old_props`, so those
+    // leftovers would otherwise silently stick around forever (e.g. a
+    // leftover inline `color` style overriding the new element's own
+    // styling). Strip the DOM element back to bare before applying the new,
+    // *complete* set of props.
+    if old_vnode.is_some() && !old_was_element {
+        let attrs = dom.attributes();
+        let mut stale_names = Vec::with_capacity(attrs.length() as usize);
+        for i in 0..attrs.length() {
+            if let Some(a) = attrs.item(i) {
+                stale_names.push(a.name());
+            }
+        }
+        for name in stale_names {
+            let _ = dom.remove_attribute(&name);
+        }
+    }
+
     // Apply props
     apply_props(&dom, &props, &old_props, &ns)?;
 
@@ -264,6 +281,14 @@ fn diff_element(
                 _ => None,
             })
             .unwrap_or_default();
+        // Same reasoning as the attribute-stripping above: `old_children` is
+        // empty here (the old vnode wasn't an Element), but the DOM element
+        // itself still has real child nodes left over. Diffing our new
+        // children against an empty list would just append on top of those
+        // leftovers instead of replacing them, so wipe them first.
+        if old_vnode.is_some() && !old_was_element {
+            dom_node.set_text_content(None);
+        }
         let mut ch = children;
         let child_ns = if tag == "foreignObject" { "html".to_string() } else { ns.clone() };
         diff_children(&dom_node, &mut ch, &old_children, &child_ns, None)?;
@@ -329,22 +354,114 @@ fn diff_component(
     let inst_ptr = inst_rc.as_ptr() as *mut ComponentInst;
     let inst_weak = Rc::downgrade(&inst_rc);
 
-    // catch_unwind: a user component panicking (bad hook usage, JS callback
-    // errors) is contained to "renders null this pass" instead of taking down the whole app.
-    let render_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        with_inst(inst_ptr, inst_weak, || render.call(props.clone()))
-    })) {
+    // A component "throws" by returning Err from its render function — the
+    // same mechanism a real React component throwing during render uses
+    // (there, any JS exception; here, `render.call` returning Err, which is
+    // exactly what a thrown JS exception becomes once it crosses the JS
+    // binding — see bindings.rs/html_template.rs's component wrappers).
+    // catch_unwind stays as a secondary safety net for genuine Rust bugs
+    // (hook misuse, an out-of-bounds index, etc — the Rust equivalent of a
+    // JS engine crash rather than an intentional `throw`): it still unwinds
+    // normally on native targets, but on wasm32-unknown-unknown with the
+    // stable toolchain a panic traps the whole instance instead of
+    // unwinding, so it remains best-effort there for that narrower class of
+    // failure specifically — unrelated to (and not needed by) the Err path.
+    let render_call_result: Result<VNode, JsValue> =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_inst(inst_ptr, inst_weak, || render.call(props.clone()))
+        })) {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let msg = panic_message(&*panic_payload);
+                crate::console_error!("[micro-react] component render panicked: {}", msg);
+                Err(JsValue::from_str(&msg))
+            }
+        };
+
+    let render_result = match render_call_result {
         Ok(vnode) => vnode,
-        Err(e) => {
-            let msg = panic_message(&*e);
-            crate::console_error!("[micro-react] component render panicked: {}", msg);
-            crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg));
+        Err(err) => {
+            // Mirrors React: an error thrown during render propagates up to
+            // the nearest ErrorBoundary ancestor. With none, it's uncaught —
+            // log it and render nothing for this subtree (React's default
+            // behavior with no boundary is to unmount the whole tree from
+            // the point of failure up; rendering null here is this
+            // reconciler's equivalent for just this subtree).
+            if !crate::hooks::report_to_nearest_boundary(&inst_rc, err.clone()) {
+                crate::console_error!(
+                    "[micro-react] uncaught error in component render (no boundary above): {}",
+                    crate::bindings::stringify_thrown(&err)
+                );
+            }
             VNode::null()
         }
     };
 
     let mut rendered = render_result;
     rendered._depth = new_vnode._depth + 1;
+
+    // Persist render_fn/props/parent_dom/ns *before* diffing children, not
+    // just after (see the "Persist everything" commit below for the normal
+    // path). This is what makes an ErrorBoundary's fallback appear
+    // synchronously on a *first mount* where a child throws immediately:
+    // report_to_nearest_boundary calls rerender_component(this instance) to
+    // force the fallback re-render right now, but rerender_component bails
+    // out with a no-op if render_fn is still None — which it would be until
+    // the block near the end of this function, well after diff_node (and
+    // thus the child's throw) has already happened. Setting it here instead
+    // means that forced re-render can actually find render_fn and run,
+    // instead of silently doing nothing and leaving the fallback to appear
+    // one microtask late (a visible flash of missing content) once the
+    // setState scheduled by the same call finally flushes.
+    //
+    // Safe to set unconditionally (no generation guard needed): nothing can
+    // have re-entrantly rendered *this* instance before this point in this
+    // call — diffing children (and thus any descendant throw) only happens
+    // below, after this assignment.
+    {
+        let mut inst = inst_rc.borrow_mut();
+        inst.render_fn = Some(render.clone());
+        inst.last_props = props.clone();
+        inst.last_parent_dom = Some(parent_dom.clone());
+        inst.last_ns = ns.to_string();
+        // Persist the ambient boundary (see ComponentInst::nearest_boundary)
+        // so a later, independent re-render of *this* instance — e.g. its
+        // own setState firing outside of any boundary's active render pass —
+        // can still find its ancestor boundary via report_to_nearest_boundary.
+        inst.nearest_boundary = crate::hooks::current_boundary();
+    }
+
+    // If the render call above already threw and had that throw absorbed by
+    // an ancestor ErrorBoundary (see BOUNDARY_ABSORBED / report_to_nearest_boundary),
+    // that boundary has already synchronously re-rendered its fallback UI
+    // in place, reusing/repurposing exactly the DOM node our own previous
+    // render (`old_rendered`) left behind. Diffing our `null` output against
+    // that `old_rendered` now would unmount/remove that node — deleting the
+    // fallback UI that was just shown. There's nothing left for us to
+    // reconcile against the live DOM in that case, so skip it entirely and
+    // just record that this instance now renders nothing.
+    if crate::hooks::take_boundary_absorbed() {
+        {
+            let mut inst = inst_rc.borrow_mut();
+            if inst.render_generation == my_generation {
+                inst.render_fn = Some(render);
+                inst.last_props = props;
+                inst.last_parent_dom = Some(parent_dom.clone());
+                inst.last_ns = ns.to_string();
+                inst.last_vnode = Some(rendered);
+            }
+        }
+        // Reflect the instance's *true* current DOM — almost certainly not
+        // this call's own (discarded) `rendered`, but whatever the reentrant
+        // boundary re-render actually committed — so the parent's vnode tree
+        // (used later purely for identity/key matching, e.g. on Reset) still
+        // points at real, live DOM instead of going stale/None.
+        new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+        if let VNodeInner::Component { inst: slot, .. } = &new_vnode.inner {
+            *slot.0.borrow_mut() = Some(inst_rc);
+        }
+        return Ok(None);
+    }
 
     // If this component registered as an error boundary, make it visible on
     // the boundary stack while diffing its own subtree, the only window a descendant's failure can report to it.
@@ -367,7 +484,7 @@ fn diff_component(
         Err(e) => {
             let msg = panic_message(&*e);
             crate::console_error!("[micro-react] reconciliation panicked: {}", msg);
-            if !crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg)) {
+            if !crate::hooks::report_to_nearest_boundary(&inst_rc, JsValue::from_str(&msg)) {
                 crate::console_error!(
                     "[micro-react] uncaught reconciliation panic (no boundary above): {}",
                     msg
@@ -379,8 +496,29 @@ fn diff_component(
     if is_boundary {
         crate::hooks::pop_boundary();
     }
+    // A reconciliation panic inside the diff_node call above may itself have
+    // been absorbed by a boundary (same reasoning as the check preceding
+    // this diff_node call). If so, the boundary already replaced the DOM
+    // this call was about to commit; take the same "nothing left to do"
+    // exit instead of stomping on it via a stale `dom`/`rendered` commit.
+    if crate::hooks::take_boundary_absorbed() {
+        {
+            let mut inst = inst_rc.borrow_mut();
+            if inst.render_generation == my_generation {
+                inst.render_fn = Some(render);
+                inst.last_props = props;
+                inst.last_parent_dom = Some(parent_dom.clone());
+                inst.last_ns = ns.to_string();
+                inst.last_vnode = Some(rendered);
+            }
+        }
+        new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+        if let VNodeInner::Component { inst: slot, .. } = &new_vnode.inner {
+            *slot.0.borrow_mut() = Some(inst_rc);
+        }
+        return Ok(None);
+    }
     let dom = dom?;
-    new_vnode._dom = dom.clone();
 
     // Persist everything a future setState-triggered re-render needs.
     //
@@ -403,6 +541,12 @@ fn diff_component(
             inst.last_vnode = Some(rendered);
         }
     }
+
+    // Same reasoning as the absorbed-path above: reflect the instance's true
+    // current DOM rather than this call's own (possibly stale/superseded)
+    // `dom`, so the parent's tree always has an accurate reference for this
+    // slot, whether or not this call was the one that ended up committing.
+    new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
 
     // Stash the (possibly newly-created) instance on the new vnode so the
     // *next* render can find it via old_vnode.
@@ -435,18 +579,60 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
     let inst_ptr = inst_rc.as_ptr() as *mut ComponentInst;
     let inst_weak = Rc::downgrade(&inst_rc);
 
-    let mut rendered = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        with_inst(inst_ptr, inst_weak, || render_fn.call(props))
-    })) {
+    let render_call_result: Result<VNode, JsValue> =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_inst(inst_ptr, inst_weak, || render_fn.call(props))
+        })) {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let msg = panic_message(&*panic_payload);
+                crate::console_error!("[micro-react] component render panicked: {}", msg);
+                Err(JsValue::from_str(&msg))
+            }
+        };
+    let mut rendered = match render_call_result {
         Ok(vnode) => vnode,
-        Err(e) => {
-            let msg = panic_message(&*e);
-            crate::console_error!("[micro-react] component render panicked: {}", msg);
-            crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg));
+        Err(err) => {
+            if !crate::hooks::report_to_nearest_boundary(&inst_rc, err.clone()) {
+                crate::console_error!(
+                    "[micro-react] uncaught error in component render (no boundary above): {}",
+                    crate::bindings::stringify_thrown(&err)
+                );
+            } else {
+                // report_to_nearest_boundary just set BOUNDARY_ABSORBED (the
+                // boundary it found already replaced our DOM synchronously).
+                // We're about to return without reconciling anything
+                // ourselves, so — unlike the Ok(vnode) path below, which
+                // reaches the take_boundary_absorbed() check further down —
+                // nothing will ever consume that flag on this path. Left
+                // set, it leaks into whatever the *next* unrelated
+                // take_boundary_absorbed() call anywhere in the program
+                // happens to be (a real bug this rewrite introduced: it
+                // caused a *later* boundary's fresh, unrelated first mount
+                // to spuriously believe one of its own children had already
+                // been absorbed, skip diffing it entirely, and never even
+                // invoke that child's render — so consume it now instead.
+                crate::hooks::take_boundary_absorbed();
+            }
             return;
         }
     };
     rendered._depth = depth + 1;
+
+    // Same reasoning as in diff_component: if the render call above threw
+    // and an ancestor ErrorBoundary already absorbed it (forcing its own
+    // synchronous re-render, DOM included), our own previous render's DOM
+    // node has already been repurposed by that fallback. Diffing our `null`
+    // output against it now would tear the fallback back out. Just record
+    // that this instance renders nothing and stop — there's no live DOM
+    // left under our control to reconcile.
+    if crate::hooks::take_boundary_absorbed() {
+        let mut inst = inst_rc.borrow_mut();
+        if inst.render_generation == my_generation {
+            inst.last_vnode = Some(rendered);
+        }
+        return;
+    }
 
     let is_boundary = inst_rc.borrow().error_setter.is_some();
     if is_boundary {
@@ -463,7 +649,7 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
         Err(e) => {
             let msg = panic_message(&*e);
             crate::console_error!("[micro-react] reconciliation panicked: {}", msg);
-            if !crate::hooks::report_to_nearest_boundary(JsValue::from_str(&msg)) {
+            if !crate::hooks::report_to_nearest_boundary(&inst_rc, JsValue::from_str(&msg)) {
                 crate::console_error!(
                     "[micro-react] uncaught reconciliation panic (no boundary above): {}",
                     msg
@@ -474,6 +660,17 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
     };
     if is_boundary {
         crate::hooks::pop_boundary();
+    }
+    // Same follow-up check as in diff_component: a reconciliation panic
+    // inside the diff_node call above may itself have been absorbed by a
+    // boundary, which already replaced the DOM this call was about to
+    // commit. Don't clobber it.
+    if crate::hooks::take_boundary_absorbed() {
+        let mut inst = inst_rc.borrow_mut();
+        if inst.render_generation == my_generation {
+            inst.last_vnode = Some(rendered);
+        }
+        return;
     }
 
     match diff_result {
@@ -690,7 +887,28 @@ const SAFE_URL_PREFIXES: &[&str] = &["https://", "http://", "mailto:", "tel:", "
 
 fn is_safe_url(val: &str) -> bool {
     let trimmed = val.trim();
-    SAFE_URL_PREFIXES.iter().any(|p| trimmed.starts_with(p))
+    if trimmed.is_empty() {
+        return true;
+    }
+    if SAFE_URL_PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // Nothing in the prefix allowlist matched. That's fine as long as the
+    // value has no URI *scheme* at all: a bare relative reference like
+    // "a.png", "img/a.png", or "?x=1" is inert (the browser resolves it
+    // against the current document, it can never dispatch as `javascript:`
+    // or similar) and was being wrongly rejected — and silently swapped
+    // for "#" — just for lacking a leading "/", "./", or "../".
+    //
+    // A value only needs blocking here if it embeds an actual scheme
+    // (letters/digits/"+"/"-"/"." followed by ":") that isn't one of the
+    // allowlisted ones above, e.g. "javascript:alert(1)" or "data:...".
+    // Per RFC 3986 a scheme can't be empty, so require at least one
+    // scheme character before the ':'.
+    match trimmed.find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))) {
+        Some(i) if i > 0 && trimmed.as_bytes()[i] == b':' => false,
+        _ => true,
+    }
 }
 
 fn apply_props(
@@ -923,4 +1141,94 @@ fn ns_uri(ns: &str) -> Option<&str> {
 
 fn document() -> Document {
     web_sys::window().expect("no window").document().expect("no document")
+}
+
+// ─── Tests for pure (non-DOM) helper logic ───
+//
+// `cargo test --lib` covers these. The DOM-dependent reconciler behavior
+// (keyed list reordering, error-boundary re-entrancy, effect timing) needs
+// a real DOM and is covered separately in `tests/reconciler.rs` via
+// wasm-bindgen-test (run with `wasm-pack test --headless --chrome`, see
+// that file for details) rather than here.
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn camel_to_kebab_basic() {
+        assert_eq!(camel_to_kebab("fontSize"), "font-size");
+        assert_eq!(camel_to_kebab("backgroundColor"), "background-color");
+        assert_eq!(camel_to_kebab("color"), "color");
+    }
+
+    #[test]
+    fn camel_to_kebab_leaves_css_custom_properties_alone() {
+        // `--my-Var` is a CSS custom property name; it must pass through
+        // untouched (no case conversion), unlike a normal camelCase prop.
+        assert_eq!(camel_to_kebab("--myVar"), "--myVar");
+    }
+
+    #[test]
+    fn is_safe_url_allows_expected_schemes() {
+        assert!(is_safe_url("https://example.com"));
+        assert!(is_safe_url("http://example.com"));
+        assert!(is_safe_url("mailto:a@b.com"));
+        assert!(is_safe_url("tel:+123"));
+        assert!(is_safe_url("#anchor"));
+        assert!(is_safe_url("/relative/path"));
+        assert!(is_safe_url("./relative"));
+        assert!(is_safe_url("../relative"));
+    }
+
+    #[test]
+    fn is_safe_url_allows_bare_relative_references() {
+        // Regression test: these have no URI scheme at all (nothing before
+        // a ":"), so the browser can only ever resolve them against the
+        // current document — they were previously rejected (and silently
+        // swapped for "#") just for lacking a leading "/", "./", or "../".
+        assert!(is_safe_url("a.png"));
+        assert!(is_safe_url("img/a.png"));
+        assert!(is_safe_url("style.css"));
+        assert!(is_safe_url("?x=1"));
+        assert!(is_safe_url(""));
+        assert!(is_safe_url("   "));
+    }
+
+    #[test]
+    fn is_safe_url_still_rejects_unknown_schemes_without_a_leading_slash() {
+        // A value with an actual scheme (letters before ":") that isn't in
+        // the allowlist must still be rejected even though it doesn't
+        // start with one of the SAFE_URL_PREFIXES literals either — the
+        // bare-relative-reference carve-out must not accidentally swallow
+        // this case.
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url("custom-scheme:payload"));
+    }
+
+    #[test]
+    fn is_safe_url_rejects_script_and_unknown_schemes() {
+        // The whole point of this allowlist is blocking `javascript:` URLs
+        // (and similar) from an untrusted href/src/action prop.
+        assert!(!is_safe_url("javascript:alert(1)"));
+        assert!(!is_safe_url("data:text/html,<script>alert(1)</script>"));
+        assert!(!is_safe_url("vbscript:msgbox(1)"));
+    }
+
+    #[test]
+    fn is_safe_url_trims_whitespace_before_checking() {
+        // Browsers tolerate leading whitespace/control chars before a
+        // scheme, so the check needs to trim first or `"  javascript:..."`
+        // would slip through as "unrecognized" and fall through to unsafe
+        // acceptance instead of being caught.
+        assert!(is_safe_url("  https://example.com"));
+        assert!(!is_safe_url("  javascript:alert(1)"));
+    }
+
+    #[test]
+    fn effective_ns_switches_into_svg_and_math() {
+        assert_eq!(effective_ns("svg", "html"), "svg");
+        assert_eq!(effective_ns("math", "html"), "math");
+        assert_eq!(effective_ns("foreignObject", "svg"), "html");
+        assert_eq!(effective_ns("div", "svg"), "svg"); // inherits current ns
+    }
 }

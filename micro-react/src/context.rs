@@ -1,7 +1,6 @@
-// ─── context.rs ───
-// Context API (mirrors React.createContext).
-// Contexts live in a thread-local map keyed by id; Provider sets the value, useContext reads and subscribes.
-// ──────────────────
+// Context API (mirrors React.createContext). Contexts live in a
+// thread-local map keyed by id; Provider sets the value, useContext
+// reads and subscribes to changes.
 
 use std::{
     any::Any,
@@ -11,22 +10,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::vnode::{VNode};
-
-// ─── Global context registry ───
-
 static CTX_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
-    /// Maps context_id → current value (as a type-erased `Rc<dyn Any>`)
+    /// Maps context_id -> current value (type-erased).
     static CTX_VALUES: RefCell<HashMap<u64, Rc<dyn Any>>> = RefCell::new(HashMap::new());
 
-    /// Maps context_id → list of waker callbacks
+    /// Maps context_id -> list of waker callbacks.
     static CTX_LISTENERS: RefCell<HashMap<u64, Vec<Rc<dyn Fn()>>>> =
         RefCell::new(HashMap::new());
 }
-
-// ─── Context<T> ───
 
 /// A context object created by `Context::new(default_value)`.
 /// Clone this to share the context across components.
@@ -37,7 +30,6 @@ pub struct Context<T: Clone + 'static> {
 }
 
 impl<T: Clone + 'static> Context<T> {
-    /// Create a new context with the given default value.
     pub fn new(default_value: T) -> Self {
         Context {
             id: CTX_ID_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -65,7 +57,7 @@ impl<T: Clone + 'static> Context<T> {
         self.notify_listeners();
     }
 
-    /// Subscribe to value changes.  Returns a de-registration closure.
+    /// Subscribe to value changes. Returns a de-registration closure.
     pub fn subscribe(&self, listener: Rc<dyn Fn()>) -> Box<dyn FnOnce()> {
         let id = self.id;
         CTX_LISTENERS.with(|m| {
@@ -89,22 +81,7 @@ impl<T: Clone + 'static> Context<T> {
         });
         for f in listeners { f(); }
     }
-
-    /// Build a Provider VNode that wraps children with a new context value.
-    pub fn provide(&self, value: T, children: Vec<VNode>) -> VNode {
-        let ctx = self.clone();
-        VNode::component(
-            "Context.Provider",
-            crate::vnode::ComponentFn::new(move |_props| {
-                ctx.set_value(value.clone());
-                VNode::fragment(children.clone())
-            }),
-            vec![],
-        )
-    }
 }
-
-// ─── useContext hook ───
 
 /// Read the current value of `ctx` and re-render this component when it changes.
 pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
@@ -121,12 +98,10 @@ pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
         enqueue_render(weak.clone());
     });
 
-    // Register the subscription in a useEffect (runs once, cleans up on unmount)
+    // Register the subscription in a useEffect (runs once, cleans up on unmount).
     let ctx_clone = ctx.clone();
     use_effect_nodrop(move || {
-        let unsub = ctx_clone.subscribe(waker);
-        // TODO: wire unsub as cleanup
-        let _ = unsub;
+        let _unsub = ctx_clone.subscribe(waker);
     }, Some(vec![DepVal(format!("ctx_{}", ctx_id))]));
 
     value

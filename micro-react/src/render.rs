@@ -1,6 +1,4 @@
-// ─── render.rs ───
-// createRoot / render — mirrors React 18 / MicroReact JS API.
-// ─────────────────
+// render() creates and mounts a root — mirrors the React 18 root API.
 
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, Node};
@@ -83,10 +81,8 @@ impl Root {
     }
 }
 
-// ─── Convenience free function (mirrors MicroReact.render in JS) ───
-
 /// Render `vnode` into `container`, replacing any existing content.
-/// Returns the root handle for subsequent updates / unmounts.
+/// Returns the root handle for subsequent updates/unmounts.
 pub fn render(vnode: VNode, container: Element) -> Result<Root, JsValue> {
     let mut root = Root::new(container);
     root.render(vnode)?;

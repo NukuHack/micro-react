@@ -1,13 +1,12 @@
-// ─── router.rs ───
-// SPA router — same API as the JS version. Match routes by path pattern
-// (including ":param" segments and a "*" catch-all) and render the match.
-// ─────────────────
+// SPA router exposed to JS as Router/Link/useLocation/useNavigate.
+// Routes are matched by path pattern (":param" segments, "*" catch-all)
+// against the browser's current location.
 
 use std::collections::HashMap;
 use wasm_bindgen::{prelude::*, JsCast};
 use js_sys::{Function, Object, Reflect};
 
-use crate::vnode::{VNode, VNodeInner, ComponentFn, Props, PropVal};
+use crate::vnode::{VNode, VNodeInner};
 use crate::hooks::{use_state, use_effect_nodrop};
 use crate::context::Context;
 use crate::bindings::{js_to_vnode, vnode_to_js};
@@ -16,7 +15,6 @@ use crate::bindings::{js_to_vnode, vnode_to_js};
 
 /// Compiled route pattern.
 pub struct Pattern {
-    pub raw: String,
     param_names: Vec<String>,
     regex: String,
 }
@@ -40,12 +38,12 @@ impl Pattern {
         }
         regex.push_str("(?:/)?$");
 
-        Pattern { raw: pattern.to_string(), param_names: names, regex }
+        Pattern { param_names: names, regex }
     }
 
     /// Returns `Some(params)` if `path` matches, `None` otherwise.
     pub fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
-        // We use JS RegExp via js_sys since we can't use the `regex` crate (too heavy for WASM without features).
+        // Uses JS RegExp via js_sys since the `regex` crate is too heavy for WASM.
         let re = js_sys::RegExp::new(&self.regex, "");
         let result = re.exec(path);
         match result {
@@ -73,129 +71,7 @@ fn regex_escape(s: &str) -> String {
     }).collect()
 }
 
-// ─── Route ───
-
-pub struct Route {
-    pub pattern: Pattern,
-    pub component: ComponentFn,
-}
-
-// ─── Router component ───
-
-/// A declarative router component.
-pub fn make_router(routes: Vec<Route>) -> ComponentFn {
-    ComponentFn::new(move |_props| {
-        let window = web_sys::window().expect("no window");
-        let initial_path = window.location().pathname().unwrap_or_else(|_| "/".to_string());
-        let initial_search = window.location().search().unwrap_or_default();
-
-        let (path, set_path) = use_state(initial_path);
-        let (search, set_search) = use_state(initial_search);
-
-        // Listen for popstate
-        let set_path2 = set_path.clone();
-        let set_search2 = set_search.clone();
-        use_effect_nodrop(move || {
-            let closure = Closure::wrap(Box::new(move |_e: web_sys::Event| {
-                let window = web_sys::window().unwrap();
-                let p = window.location().pathname().unwrap_or_default();
-                let s = window.location().search().unwrap_or_default();
-                set_path2(p);
-                set_search2(s);
-            }) as Box<dyn Fn(web_sys::Event)>);
-
-            let window = web_sys::window().unwrap();
-            let _ = window.add_event_listener_with_callback(
-                "popstate",
-                closure.as_ref().unchecked_ref(),
-            );
-            closure.forget();
-        }, Some(vec![]));
-
-        // Match route
-        let mut matched_comp: Option<&ComponentFn> = None;
-        let mut matched_params: HashMap<String, String> = HashMap::new();
-
-        for route in &routes {
-            if let Some(params) = route.pattern.matches(&path) {
-                matched_comp = Some(&route.component);
-                matched_params = params;
-                break;
-            }
-        }
-
-        // Build location context props
-        let mut ctx_props: Props = vec![
-            ("path".to_string(), PropVal::Str(path.clone())),
-            ("search".to_string(), PropVal::Str(search.clone())),
-        ];
-        for (k, v) in &matched_params {
-            ctx_props.push((format!("param_{}", k), PropVal::Str(v.clone())));
-        }
-
-        match matched_comp {
-            Some(comp) => comp.call(ctx_props),
-            None => VNode::text("404 Not Found"),
-        }
-    })
-}
-
-/// Convenience macro for declaring routes.
-/// e.g. `routes! { "/" => home, "/about" => about }`
-#[macro_export]
-macro_rules! routes {
-    ($($pattern:literal => $comp:expr),* $(,)?) => {
-        vec![
-            $(
-                $crate::router::Route {
-                    pattern: $crate::router::Pattern::compile($pattern),
-                    component: $crate::vnode::ComponentFn::new($comp),
-                }
-            ),*
-        ]
-    };
-}
-
-// ─── Link component ───
-
-pub fn link(to: &str, children: Vec<VNode>) -> VNode {
-    let to = to.to_string();
-    let onclick = {
-        let to = to.clone();
-        Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
-            if e.default_prevented() || e.button() != 0 || e.meta_key() || e.ctrl_key() {
-                return;
-            }
-            e.prevent_default();
-            let window = web_sys::window().unwrap();
-            let history = window.history().unwrap();
-            let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to));
-            window.dispatch_event(&web_sys::Event::new("popstate").unwrap()).ok();
-        }) as Box<dyn Fn(web_sys::MouseEvent)>)
-    };
-    let onclick_fn: js_sys::Function = onclick.as_ref().unchecked_ref::<js_sys::Function>().clone();
-    onclick.forget();
-
-    VNode::tag("a")
-        .attr("href", &to as &str)
-        .on("onClick", onclick_fn)
-        .children(children)
-        .build()
-}
-
-// ─── useNavigate ───
-
-/// Returns a `navigate(to: &str)` closure.
-pub fn use_navigate() -> impl Fn(&str) {
-    move |to: &str| {
-        let window = web_sys::window().unwrap();
-        let history = window.history().unwrap();
-        let _ = history.push_state_with_url(&JsValue::NULL, "", Some(to));
-        window.dispatch_event(&web_sys::Event::new("popstate").unwrap()).ok();
-    }
-}
-
-// ─── JS-visible bindings: mirrors Router/Link/useLocation/useNavigate on the same hooks/Context machinery, so index.html just assigns window.Router = ... ───
+// ─── JS-visible bindings ───
 
 thread_local! {
     /// Shared location context: { path, search, params }

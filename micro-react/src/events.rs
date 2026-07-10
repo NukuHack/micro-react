@@ -1,8 +1,6 @@
-// ─── events.rs ───
-// Preact-style logical-clock event proxy, guards against a handler firing
-// on the same event that triggered its own mount ("fire after mount").
-// One proxy listener per (element, event, capture) compares attach time to the event's timeStamp to suppress stale fires.
-// ─────────────────
+// Preact-style logical-clock event proxy: guards against a handler firing
+// on the same event that triggered its own mount. One proxy listener per
+// (element, event, capture) compares attach time to the event's timeStamp.
 
 use wasm_bindgen::{prelude::*, JsCast};
 use js_sys::{Function, Reflect};

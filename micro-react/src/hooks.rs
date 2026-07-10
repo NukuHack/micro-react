@@ -1,5 +1,3 @@
-// ─── hooks.rs ────────────────────────────────────────────────────────────────
-
 use std::{cell::RefCell, rc::{Rc, Weak}};
 use wasm_bindgen::prelude::*;
 
@@ -16,26 +14,24 @@ pub struct ComponentInst {
     pub parent_dom: Option<web_sys::Element>,
     pub error_setter: Option<Rc<dyn Fn(JsValue)>>,
 
-    /// Bumped at the start of every render of this instance (initial mount,
-    /// rerender_component, or a reentrant render triggered mid-diff by a
-    /// synchronous setState). Used so a render that is still "in flight" when
-    /// a nested/reentrant render for the *same* instance completes can detect
-    /// that it is stale and avoid clobbering the fresher `last_vnode` (etc.)
-    /// the reentrant render just committed. See diff_component / rerender_component.
+    /// The nearest ancestor ErrorBoundary as of this instance's last full
+    /// diff pass (see `hooks::current_boundary` / `report_to_nearest_boundary`).
+    /// Persisted (unlike `BOUNDARY_STACK`, which only reflects the *current*
+    /// render-call window) so a failure from this component's own later,
+    /// independent re-render — triggered by its own setState outside of any
+    /// boundary's active render pass — can still find the right boundary.
+    pub nearest_boundary: Option<Weak<RefCell<ComponentInst>>>,
+
+    /// Bumped at the start of every render of this instance. Lets a
+    /// reentrant render (triggered mid-diff by a synchronous setState)
+    /// detect that an outer, now-stale render shouldn't clobber it.
     pub render_generation: u64,
 
-    // ── Re-render bookkeeping: what a setState-triggered re-render needs to actually re-invoke and patch, not just reset hooks ──
-    /// The component's render closure, captured at (re)mount time.
+    // ── Re-render bookkeeping: what a setState-triggered re-render needs ──
     pub render_fn: Option<ComponentFn>,
-    /// Props from the most recent render (re-renders triggered by this
-    /// instance's own setState reuse the same props its parent gave it).
     pub last_props: Props,
-    /// The DOM node this component's output was last mounted under.
     pub last_parent_dom: Option<web_sys::Node>,
-    /// Namespace ("html" | "svg" | "math") in effect for that subtree.
     pub last_ns: String,
-    /// The vnode tree this instance rendered last time, used as the "old"
-    /// side of the diff on the next render.
     pub last_vnode: Option<VNode>,
 }
 
@@ -49,6 +45,7 @@ impl ComponentInst {
             depth: 0,
             parent_dom: None,
             error_setter: None,
+            nearest_boundary: None,
             render_generation: 0,
             render_fn: None,
             last_props: Vec::new(),
@@ -82,16 +79,11 @@ pub enum HookSlot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DepVal(pub String);
 
-impl DepVal {
-    pub fn of<T: std::fmt::Debug>(v: &T) -> Self { DepVal(format!("{:?}", v)) }
-    pub fn js(_v: &JsValue) -> Self { DepVal("js".to_string()) }
-}
-
 // ─── Current component (thread-local dispatcher) ───
 thread_local! {
     pub(crate) static CURRENT_INST: RefCell<Option<*mut ComponentInst>> = RefCell::new(None);
     // Weak handle to the same instance as CURRENT_INST. Anything that
-    // outlives the render (closures, effects) must upgrade() this instead of dereferencing the raw pointer.
+    // outlives the render must upgrade() this instead of using the raw pointer.
     pub(crate) static CURRENT_WEAK: RefCell<Option<Weak<RefCell<ComponentInst>>>> = RefCell::new(None);
 }
 
@@ -120,9 +112,23 @@ pub fn with_inst<R>(
     result
 }
 
-// ─── Error boundary stack: tracks currently-rendering ErrorBoundary instances (innermost last) ───
+// ─── Error boundary stack: currently-rendering ErrorBoundary instances (innermost last) ───
 thread_local! {
     static BOUNDARY_STACK: RefCell<Vec<Weak<RefCell<ComponentInst>>>> = RefCell::new(Vec::new());
+
+    /// Set when a throw was just absorbed by a synchronous ancestor
+    /// ErrorBoundary re-render, so the still-unwinding failing component
+    /// knows not to unmount/diff the DOM node the fallback just took over.
+    static BOUNDARY_ABSORBED: RefCell<bool> = RefCell::new(false);
+}
+
+/// See `BOUNDARY_ABSORBED` above. Read-and-clear.
+pub fn take_boundary_absorbed() -> bool {
+    BOUNDARY_ABSORBED.with(|f| {
+        let v = *f.borrow();
+        *f.borrow_mut() = false;
+        v
+    })
 }
 
 pub fn push_boundary(inst: Weak<RefCell<ComponentInst>>) {
@@ -133,37 +139,80 @@ pub fn pop_boundary() {
     BOUNDARY_STACK.with(|s| { s.borrow_mut().pop(); });
 }
 
-/// Hand a render failure to the nearest live ErrorBoundary ancestor.
-/// Returns true if a boundary accepted it, false if the caller should fall back to logging.
-pub fn report_to_nearest_boundary(err: JsValue) -> bool {
-    // Collect the setter and drop the BOUNDARY_STACK borrow before calling
-    // it, since the re-render it triggers may re-entrantly push/pop the stack.
-    let setter = BOUNDARY_STACK.with(|s| {
-        for weak in s.borrow().iter().rev() {
-            if let Some(inst_rc) = weak.upgrade() {
-                // Same reasoning, one level in: clone the setter out before calling it.
-                let setter = inst_rc.borrow().error_setter.clone();
-                if setter.is_some() {
-                    return setter;
-                }
-            }
-        }
-        None
-    });
-
-    match setter {
-        Some(setter) => { setter(err); true }
-        None => false,
-    }
+/// The boundary currently on top of `BOUNDARY_STACK`, i.e. the nearest
+/// ancestor ErrorBoundary that is actively diffing its subtree right now.
+/// Called by `diff_component` on *every* component (not just failing ones)
+/// to persist onto `ComponentInst::nearest_boundary`, so the association
+/// with the ancestor boundary survives beyond this one render-call window —
+/// see the doc comment on that field for why that matters.
+pub fn current_boundary() -> Option<Weak<RefCell<ComponentInst>>> {
+    BOUNDARY_STACK.with(|s| s.borrow().last().cloned())
 }
 
-// ─── helper: get &hooks safely through raw ptr ───────────────────────────────
+/// Hand a render/reconciliation failure to the nearest live ErrorBoundary
+/// ancestor of `origin` — the component instance whose render (or whose
+/// subtree's reconciliation) just failed. Returns true if a boundary
+/// accepted it, false if the caller should fall back to logging.
+///
+/// Takes `origin` explicitly rather than reading `CURRENT_INST`: this is
+/// called from `diff_component`/`rerender_component` *after* `with_inst`
+/// has already returned (and thus already reset `CURRENT_INST` back to
+/// whatever it was before), so `CURRENT_INST` no longer reliably points at
+/// the failing component by the time this runs — every call site already
+/// has the right instance sitting in scope as `inst_rc`, so just use that
+/// directly instead of going through fragile ambient state.
+pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsValue) -> bool {
+    // Prefer `origin`'s own persisted `nearest_boundary`: this is what lets
+    // a component's later, *independent* re-render (its own setState firing
+    // outside of any boundary's active render pass) still find its
+    // ancestor boundary, since BOUNDARY_STACK itself would be empty in that
+    // situation (nothing is currently diffing there).
+    let from_origin = origin.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
+
+    let target = from_origin
+        .filter(|inst_rc| inst_rc.borrow().error_setter.is_some())
+        .or_else(|| {
+            // Fall back to the dynamic call-stack view. This is what covers
+            // a first-ever render, where the failing component hasn't had a
+            // diff pass yet to populate `nearest_boundary` in the first
+            // place (it's still accurate here because we're still inside
+            // the ancestor boundary's own diff_node call, which is exactly
+            // the window BOUNDARY_STACK reflects).
+            BOUNDARY_STACK.with(|s| {
+                for weak in s.borrow().iter().rev() {
+                    if let Some(inst_rc) = weak.upgrade() {
+                        if inst_rc.borrow().error_setter.is_some() {
+                            return Some(inst_rc);
+                        }
+                    }
+                }
+                None
+            })
+        });
+
+    let Some(inst_rc) = target else { return false };
+
+    let setter = inst_rc.borrow().error_setter.clone();
+    let Some(setter) = setter else { return false };
+    setter(err);
+
+    // The setter above only schedules a re-render for the next microtask,
+    // which isn't guaranteed to run before paint. Force it now so the
+    // fallback UI appears in this same synchronous pass.
+    crate::diff::rerender_component(inst_rc);
+
+    // The boundary's DOM subtree has now been replaced by the fallback UI;
+    // tell the still-unwinding failing component not to touch it.
+    BOUNDARY_ABSORBED.with(|f| *f.borrow_mut() = true);
+
+    true
+}
+
+// ─── helper: get &hooks safely through raw ptr ───
 // SAFETY: WASM is single-threaded; inst is valid for the duration of a render.
 macro_rules! hooks_ref {
     ($inst:expr) => { unsafe { &(&(*$inst).hooks) } }
 }
-// hooks_get_mut: get a mutable reference to a hook slot by index via raw ptr
-// Using a function instead of indexing through a temporary &mut Vec reference.
 #[inline(always)]
 unsafe fn hooks_get_mut(inst: *mut ComponentInst, idx: usize) -> &'static mut HookSlot {
     &mut (&mut (*inst).hooks)[idx]
@@ -183,63 +232,12 @@ macro_rules! hooks_len {
 
 // ─── useState ───
 pub fn use_state<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(T)>) {
-    let inst = current_inst();
-    let idx  = hook_idx!(inst);
-    hook_idx_inc!(inst);
-
-    if hooks_len!(inst) <= idx {
-        let val: Box<dyn std::any::Any> = Box::new(initial.clone());
-        hooks_push!(inst, HookSlot::State { value: Rc::new(RefCell::new(val)) });
-    }
-
-    let value_rc = match &hooks_ref!(inst)[idx] {
-        HookSlot::State { value } => value.clone(),
-        _ => panic!("hook type mismatch at {}", idx),
-    };
-
-    let current = value_rc.borrow().downcast_ref::<T>().expect("state type mismatch").clone();
-
-    // Capture a Weak, not the raw pointer: this setter is often stashed in
-    // handlers/timers that may fire after the component has unmounted.
-    let weak = current_weak();
-    let setter: Rc<dyn Fn(T)> = Rc::new(move |next: T| {
-        *value_rc.borrow_mut() = Box::new(next);
-        enqueue_render(weak.clone());
-    });
-
+    let (current, _cell, setter) = use_state_cell(initial);
     (current, setter)
 }
 
-// ─── useState with functional updater ───
-pub fn use_state_fn<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(Box<dyn FnOnce(T) -> T>)>) {
-    let inst = current_inst();
-    let idx  = hook_idx!(inst);
-    hook_idx_inc!(inst);
-
-    if hooks_len!(inst) <= idx {
-        let val: Box<dyn std::any::Any> = Box::new(initial);
-        hooks_push!(inst, HookSlot::State { value: Rc::new(RefCell::new(val)) });
-    }
-
-    let value_rc = match &hooks_ref!(inst)[idx] {
-        HookSlot::State { value } => value.clone(),
-        _ => panic!("hook type mismatch"),
-    };
-
-    let current = value_rc.borrow().downcast_ref::<T>().unwrap().clone();
-
-    let weak = current_weak();
-    let setter: Rc<dyn Fn(Box<dyn FnOnce(T) -> T>)> = Rc::new(move |f: Box<dyn FnOnce(T) -> T>| {
-        let old  = value_rc.borrow().downcast_ref::<T>().unwrap().clone();
-        let next = f(old);
-        *value_rc.borrow_mut() = Box::new(next);
-        enqueue_render(weak.clone());
-    });
-
-    (current, setter)
-}
-
-// ─── useState — cell-exposing variant: returns the hook's live cell so JS functional updates resolve against current value, not a stale snapshot ───
+// ─── useState — cell-exposing variant: exposes the hook's live cell so JS
+// functional updates resolve against the current value, not a stale snapshot ───
 pub fn use_state_cell<T: Clone + 'static>(
     initial: T,
 ) -> (T, Rc<RefCell<Box<dyn std::any::Any>>>, Rc<dyn Fn(T)>) {
@@ -259,6 +257,8 @@ pub fn use_state_cell<T: Clone + 'static>(
 
     let current = value_rc.borrow().downcast_ref::<T>().expect("state type mismatch").clone();
 
+    // Capture a Weak, not the raw pointer: this setter is often stashed in
+    // handlers/timers that may fire after the component has unmounted.
     let weak = current_weak();
     let cell_for_setter = value_rc.clone();
     let setter: Rc<dyn Fn(T)> = Rc::new(move |next: T| {
@@ -272,9 +272,8 @@ pub fn use_state_cell<T: Clone + 'static>(
 // ─── useReducer ───
 
 /// Cell-exposing variant: returns the hook's live backing cell alongside the
-/// value and dispatcher, same reasoning as `use_state_cell` — lets a caller
-/// (e.g. the JS bindings) key a cache off the cell's stable address instead
-/// of rebuilding a JS-facing wrapper every render.
+/// value and dispatcher, so a caller (e.g. the JS bindings) can key a cache
+/// off the cell's stable address.
 pub fn use_reducer_cell<S, A>(
     reducer: impl Fn(S, A) -> S + 'static,
     initial: S,
@@ -308,16 +307,6 @@ where S: Clone + 'static, A: 'static
     });
 
     (current, value_rc, dispatch)
-}
-
-pub fn use_reducer<S, A>(
-    reducer: impl Fn(S, A) -> S + 'static,
-    initial: S,
-) -> (S, Rc<dyn Fn(A)>)
-where S: Clone + 'static, A: 'static
-{
-    let (current, _cell, dispatch) = use_reducer_cell(reducer, initial);
-    (current, dispatch)
 }
 
 // ─── useEffect / useLayoutEffect (shared inner) ───
@@ -400,22 +389,6 @@ pub fn use_layout_effect(
     schedule_effect_inner(true, boxed, deps);
 }
 
-// ─── useRef ───
-pub fn use_ref() -> crate::vnode::NodeRef {
-    let inst = current_inst();
-    let idx  = hook_idx!(inst);
-    hook_idx_inc!(inst);
-
-    if hooks_len!(inst) <= idx {
-        hooks_push!(inst, HookSlot::Ref { value: crate::vnode::NodeRef::new() });
-    }
-
-    match &hooks_ref!(inst)[idx] {
-        HookSlot::Ref { value } => value.clone(),
-        _ => panic!("hook type mismatch"),
-    }
-}
-
 // ─── useMemo / useCallback ───
 pub fn use_memo<T: Clone + 'static>(
     factory: impl FnOnce() -> T,
@@ -476,18 +449,6 @@ pub fn use_id() -> String {
         HookSlot::Id { value } => value.clone(),
         _ => panic!("hook type mismatch"),
     }
-}
-
-// ─── useDeferredValue ───
-pub fn use_deferred_value<T: Clone + PartialEq + 'static>(value: T) -> T {
-    let (deferred, set) = use_state(value.clone());
-    use_effect_nodrop({
-        let value = value.clone();
-        move || {
-            crate::scheduler::start_transition(move || { set(value); });
-        }
-    }, Some(vec![DepVal("deferred".to_string())]));
-    deferred
 }
 
 // ─── Unmount — run all effect cleanups ───

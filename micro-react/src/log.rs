@@ -1,6 +1,4 @@
-// ─── log.rs ───────────────────────────────────
-// Forwards log/warn/error messages to the browser's JS console.
-// ────────────────────────────────────────────────
+// Forwards log/warn/error messages to the browser console.
 
 /// Log an info-level message to `console.log`.
 #[macro_export]
