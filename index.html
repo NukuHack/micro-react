@@ -20,12 +20,8 @@ await initWasm();
 const Fragment = MicroReact.getFragment();
 const ErrorBoundary = MicroReact.createErrorBoundary();
 const html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
-// wasm-bindgen's createElement only takes 3 fixed args, so gather the
-// variadic children into an array before crossing into wasm.
-const h = (type, props, ...children) => MicroReact.createElement(type, props, children);
 
 // Make everything available globally
-window.h = h;
 window.Fragment = Fragment;
 window.html = html;
 window.ErrorBoundary = ErrorBoundary;
