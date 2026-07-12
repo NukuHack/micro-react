@@ -350,6 +350,45 @@ fn component_hole_receives_props_and_children() {
     assert_eq!(container.query_selector("b").unwrap().unwrap().text_content().unwrap(), "hello");
 }
 
+#[wasm_bindgen_test]
+fn self_closing_component_as_top_level_root_does_not_swallow_its_sibling() {
+    // Same bug class as `self_closing_component_does_not_swallow_its_sibling`,
+    // but with the self-closed component as one of the template's *own*
+    // top-level roots (rendered via the multi-root -> Fragment path in
+    // `html_template`) rather than nested inside a wrapping element.
+    let comp_closure = {
+        let inner = Rc::new(|_props: JsValue| -> JsValue { tpl(&["<i>comp</i>"], vec![]) });
+        Closure::wrap(Box::new(move |props: JsValue| inner(props)) as Box<dyn FnMut(JsValue) -> JsValue>)
+    };
+    let comp_fn: Function = comp_closure.as_ref().unchecked_ref::<Function>().clone();
+
+    let vn = tpl(
+        &["<", " /><span>after</span>"],
+        vec![comp_fn.into()],
+    );
+    let (container, _root) = mount(vn);
+    assert_eq!(container.children().length(), 2, "component and span should be top-level siblings, not nested");
+    assert_eq!(container.query_selector("i").unwrap().unwrap().text_content().unwrap(), "comp");
+    assert_eq!(container.query_selector("span").unwrap().unwrap().text_content().unwrap(), "after");
+}
+
+#[wasm_bindgen_test]
+fn function_component_used_as_tag_renders_like_jsx() {
+    // The exact use case: exporting a plain function and using it as an
+    // html tag, both self-closed with props and with explicit children.
+    let card_closure = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
+        let title = Reflect::get(&props, &"title".into()).unwrap().as_string().unwrap();
+        tpl(&["<section class=\"card\"><h1>", "</h1></section>"], vec![JsValue::from_str(&title)])
+    }) as Box<dyn FnMut(JsValue) -> JsValue>);
+    let card_fn: Function = card_closure.as_ref().unchecked_ref::<Function>().clone();
+
+    // Self-closing usage: `<${Card} title="Hi" />`
+    let vn = tpl(&["<", " title=\"Hi\" />"], vec![card_fn.into()]);
+    let (container, _root) = mount(vn);
+    assert!(container.query_selector("section.card").unwrap().is_some());
+    assert_eq!(container.query_selector("h1").unwrap().unwrap().text_content().unwrap(), "Hi");
+}
+
 // ───────────────────────────── keys & refs ─────────────────────────────
 
 #[wasm_bindgen_test]
