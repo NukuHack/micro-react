@@ -20,12 +20,12 @@ pub mod router;
 pub mod scheduler;
 pub mod vnode;
 
-pub use vnode::{Children, Key, Props, VNode, VNodeInner};
 pub use render::Root;
+pub use vnode::{Children, Key, Props, VNode, VNodeInner};
 
 /// Runs once when the WASM module is instantiated.
 #[wasm_bindgen(start)]
 pub fn wasm_start() {
-    console_error_panic_hook::set_once();
-    console_log!("[micro-react] wasm module initialized");
+	console_error_panic_hook::set_once();
+	console_log!("[micro-react] wasm module initialized");
 }
