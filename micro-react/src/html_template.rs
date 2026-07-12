@@ -1,6 +1,6 @@
-// Implements the `html` tagged-template API: compile the static parts once
-// per call-site into a cached skeleton, then substitute live JS values into
-// it on every call, so callbacks/refs/keys survive intact.
+//! Implements the `html` tagged-template API: compile the static parts once
+//! per call-site into a cached skeleton, then substitute live JS values into
+//! it on every call, so callbacks/refs/keys survive intact.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -211,12 +211,9 @@ const CASED_ATTR_NAMES: &[(&str, &str)] = &[
 	("referrerpolicy", "referrerPolicy"),
 	("viewbox", "viewBox"),
 	("dangerouslysetinnerhtml", "dangerouslySetInnerHTML"),
-	// SVG presentation/animation attributes: the HTML parser's "adjust SVG
-	// attributes" step only fixes case for a fixed table of known SVG
-	// attribute names, and even that only applies while the parser is
-	// actually in the SVG foreign-content insertion mode. Since this crate
-	// reads attribute names back out as plain lowercase strings, any of
-	// these that slip through un-adjusted need restoring here too.
+	// The HTML parser's "adjust SVG attributes" step only fixes case for a
+	// fixed table of known names, and only in SVG foreign-content mode.
+	// Anything that slips through un-adjusted needs restoring here too.
 	("attributename", "attributeName"),
 	("attributetype", "attributeType"),
 	("basefrequency", "baseFrequency"),
@@ -373,11 +370,9 @@ fn build_case_map(html: &str) -> HashMap<String, String> {
 }
 
 fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> String {
-	// Prefer the casing the author actually wrote at this call-site — it's
-	// ground truth, reconstructed before the HTML parser had a chance to
-	// lowercase it. Takes priority over the generic SVG/event heuristics
-	// below, which only exist as a fallback for when the source itself
-	// used lowercase (e.g. deliberately-lowercase `viewbox`).
+	// Prefer the casing the author wrote at this call-site — ground truth
+	// reconstructed before the parser lowercased it — over the generic
+	// SVG/event heuristics below, which are only a lowercase-source fallback.
 	if let Some(original) = case_map.get(lowered) {
 		return original.clone();
 	}
@@ -387,21 +382,16 @@ fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> Str
 			return (*to).to_string();
 		}
 	}
-	// Event props (`onclick`, `onclickcapture`, …): the DOM lowers case
-	// indiscriminately, but `parse_event_prop` only recognizes a capture
-	// listener via a literal trailing "Capture" (exact case) — so a
-	// capture suffix lost to lowercasing would silently downgrade to a
-	// bubble-phase listener. Restore just that one bit of case; the event
-	// name itself is lowercased again downstream regardless, so its case
-	// here doesn't matter.
+	// `parse_event_prop` only recognizes a capture listener via a literal
+	// trailing "Capture" (exact case), so a suffix lost to lowercasing
+	// would silently downgrade to bubble phase — restore just that bit.
 	if let Some(rest) = lowered.strip_prefix("on") {
 		if !rest.is_empty() {
 			if let Some(evt) = rest.strip_suffix("capture") {
 				if !evt.is_empty() {
-					// Cosmetic only (parse_event_prop lowercases the event
-					// name again downstream regardless), but restoring the
-					// leading capital keeps the reconstructed name looking
-					// like a real prop name instead of "onclickCapture".
+					// Cosmetic only (the event name is lowercased again
+					// downstream regardless) but keeps the reconstructed
+					// name looking like a real prop, not "onclickCapture".
 					let mut chars = evt.chars();
 					let evt_capitalized = match chars.next() {
 						Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
@@ -496,9 +486,8 @@ fn build_sentinel_html(statics: &[String]) -> String {
 
 		let prev_trimmed = statics[i].trim_end();
 		let next = statics.get(i + 1).map(String::as_str).unwrap_or("");
-		// Deliberately NOT trimmed: whether the hole is immediately followed
-		// by whitespace/`>`/`/` (tag position) vs. anything else (content
-		// position) depends on the character right after it, and trimming
+		// Deliberately NOT trimmed: whether the hole is in tag vs. content
+		// position depends on the character right after it, and trimming
 		// first would throw that signal away.
 		let next_first = next.chars().next();
 
@@ -585,14 +574,10 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 			let tt = split_holes(&text);
 			if tt.holes.is_empty() {
 				if text.trim().is_empty() {
-					// A whitespace-only run containing a newline is almost
-					// always template-formatting indentation ("\n      "
-					// between block-level tags) and should collapse to
-					// nothing, matching JSX. But a whitespace-only run with
-					// *no* newline is a deliberate same-line separator —
-					// `<span>a</span> <span>b</span>` — and dropping it
-					// would silently glue the two elements together, unlike
-					// `h()` where that space is an explicit string child.
+					// A whitespace run with a newline is template-formatting
+					// indentation and should collapse, matching JSX. One
+					// with no newline is a deliberate same-line separator
+					// (`<span>a</span> <span>b</span>`) and must be kept.
 					if !text.is_empty() && !text.contains('\n') {
 						Some(ChildTemplate::StaticText(" ".to_string()))
 					} else {
@@ -868,11 +853,9 @@ fn build_static_attrs(builder: crate::vnode::ElementBuilder, tpl: &ElementTempla
 		builder = builder.attr(k.clone(), v.clone());
 	}
 	for a in &tpl.attr_holes {
-		// `dangerouslySetInnerHTML={{ __html: ... }}` — diff::set_prop looks
-		// for the flattened key "dangerouslySetInnerHTML.__html" holding a
-		// plain string; unwrap the live JS `{ __html }` object here rather
-		// than passing it through as an opaque `PropVal::Js`, which
-		// set_prop has no rule for and would just silently drop.
+		// `dangerouslySetInnerHTML={{ __html }}` — diff::set_prop expects the
+		// flattened key "dangerouslySetInnerHTML.__html" as a plain string,
+		// so unwrap it here rather than passing an opaque `PropVal::Js`.
 		if a.name == "dangerouslySetInnerHTML" {
 			if let AttrValueTemplate::Hole(i) = &a.value {
 				let raw = values.get(*i as u32);
@@ -977,10 +960,8 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 }
 
 // ───────────────────── pure-logic unit tests ─────────────────────
-//
-// These exercise `expand_self_closing_tags` and `normalize_attr_name` in
-// isolation — no DOM/JS needed, so they run under plain `cargo test --lib`,
-// unlike the DomParser-dependent paths which need `wasm-pack test`.
+// Exercises `expand_self_closing_tags`/`normalize_attr_name` in isolation,
+// no DOM/JS needed, so plain `cargo test --lib` covers these.
 #[cfg(test)]
 mod pure_logic_tests {
 	use super::*;
@@ -1064,15 +1045,9 @@ mod pure_logic_tests {
 	}
 
 	// ── build_case_map / normalize_attr_name case restoration ──
-	//
-	// Regression coverage for the bug where a camelCase *component* prop
-	// written in a `html\`\`` template (e.g. `setThemeIdx="${fn}"`) got
-	// silently flattened to `setthemeidx` because `DomParser` lowercases
-	// attribute names, and the old `normalize_attr_name` only restored
-	// casing for a hardcoded table of DOM props plus `on...Capture` event
-	// names. `build_case_map` recovers the author's original casing from
-	// the pre-parse HTML text itself, so *any* camelCase name — not just
-	// known DOM/event ones — survives.
+	// Regression coverage: a camelCase prop like `setThemeIdx` used to get
+	// flattened to `setthemeidx` since the old restore logic only covered a
+	// hardcoded table. `build_case_map` recovers casing from the source text.
 
 	#[test]
 	fn case_map_records_camel_case_attr_names() {
@@ -1110,9 +1085,8 @@ mod pure_logic_tests {
 	#[test]
 	fn normalize_attr_name_case_map_does_not_break_svg_auto_correction() {
 		// A deliberately-lowercase SVG attr like `viewbox` must still get
-		// auto-corrected to `viewBox` via CASED_ATTR_NAMES — the case map
-		// only ever holds names that had *some* uppercase in the source, so
-		// it can't accidentally shadow this fallback.
+		// auto-corrected via CASED_ATTR_NAMES — the case map only holds
+		// names with some uppercase in the source, so it can't shadow this.
 		let map = build_case_map(r#"<svg viewbox="0 0 1 1"></svg>"#);
 		assert_eq!(normalize_attr_name("viewbox", &map), "viewBox");
 	}
@@ -1145,11 +1119,9 @@ mod pure_logic_tests {
 	#[test]
 	fn restores_capture_suffix_on_event_props() {
 		assert_eq!(normalize_attr_name("onclickcapture", &HashMap::new()), "onClickCapture");
-		// Only the leading letter of the collapsed event name can be
-		// cosmetically restored (mid-word boundaries like "Enter" in
-		// "mouseenter" are unrecoverable from lowercase alone) — but the
-		// "Capture" suffix, which is the part that's functionally load
-		// bearing for parse_event_prop, is always restored exactly.
+		// Only the leading letter of the event name can be cosmetically
+		// restored (mid-word boundaries are unrecoverable from lowercase),
+		// but the functionally load-bearing "Capture" suffix always is.
 		assert_eq!(normalize_attr_name("onmouseentercapture", &HashMap::new()), "onMouseenterCapture");
 	}
 

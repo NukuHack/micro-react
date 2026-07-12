@@ -1,6 +1,6 @@
-// VNode tree + fluent element builder. A Template stores only the static
-// skeleton (tag + static attrs) of an Element; dynamic values live in
-// `holes`/`props` and are resolved at diff time.
+//! VNode tree + fluent element builder. A Template stores only the static
+//! skeleton (tag + static attrs) of an Element; dynamic values live in
+//! `holes`/`props` and are resolved at diff time.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -266,12 +266,9 @@ impl NodeRef {
 }
 
 // ─── ComponentFn — an `Fn(Props) -> Result<VNode, JsValue>` wrapped in Rc so it's Clone ───
-//
-// A component can "throw" by returning `Err`, exactly like a real React
-// component throwing during render becomes a JS exception the reconciler
-// catches. `Err` propagates up to the nearest ErrorBoundary ancestor (see
-// `diff::diff_component` / `hooks::report_to_nearest_boundary`), the same
-// way React walks up the fiber tree to find the nearest boundary.
+// A component can "throw" by returning `Err`, which propagates up to the
+// nearest ErrorBoundary (see `diff::diff_component` /
+// `hooks::report_to_nearest_boundary`), mirroring React's fiber walk.
 #[derive(Clone)]
 pub struct ComponentFn(pub std::rc::Rc<dyn Fn(Props) -> Result<VNode, JsValue>>);
 

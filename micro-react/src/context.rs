@@ -1,6 +1,6 @@
-// Context API (mirrors React.createContext). Contexts live in a
-// thread-local map keyed by id; Provider sets the value, useContext
-// reads and subscribes to changes.
+//! Context API (mirrors React.createContext). Contexts live in a
+//! thread-local map keyed by id; Provider sets the value, useContext
+//! reads and subscribes to changes.
 
 use std::{
 	any::Any,

@@ -1,6 +1,6 @@
-// Microtask-batched rerender scheduler (architecture mirrors Preact's).
-// setState/dispatch push into DIRTY_QUEUE, flushed depth-first on the
-// next microtask.
+//! Microtask-batched rerender scheduler (architecture mirrors Preact's).
+//! setState/dispatch push into DIRTY_QUEUE, flushed depth-first on the
+//! next microtask.
 
 use std::{
 	cell::RefCell,
@@ -84,7 +84,7 @@ fn schedule_flush() {
 			// Leak intentionally: lives for the app's entire lifetime.
 			*slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
 		}
-		slot.as_ref().unwrap().clone()
+		slot.as_ref().expect("slot was just set above").clone()
 	});
 
 	// queueMicrotask is not in web-sys yet; call via js-sys.

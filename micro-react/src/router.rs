@@ -1,6 +1,6 @@
-// SPA router exposed to JS as Router/Link/useLocation/useNavigate.
-// Routes are matched by path pattern (":param" segments, "*" catch-all)
-// against the browser's current location.
+//! SPA router exposed to JS as Router/Link/useLocation/useNavigate.
+//! Routes are matched by path pattern (":param" segments, "*" catch-all)
+//! against the browser's current location.
 
 use js_sys::{Function, Object, Reflect};
 use std::collections::HashMap;
@@ -167,11 +167,9 @@ pub fn js_router(props: JsValue) -> JsValue {
 #[wasm_bindgen(js_name = Link)]
 pub fn js_link(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
-	// `html\`\`` authoring uses real HTML attribute names (`class`, not
-	// `className` — see the convention documented at the top of script.js),
-	// so that's the name Link needs to honor for `<${Link} class="...">` to
-	// actually reach the rendered `<a>`. `className` is kept as a fallback
-	// for `h()`-style JSX callers, which pass real JS prop names instead.
+	// `html` authoring uses real HTML attribute names (`class`, not
+	// `className`; see script.js), so Link honors that. `className` is
+	// kept as a fallback for `h()`-style JSX callers.
 	let class_name = Reflect::get(&props, &"class".into())
 		.ok()
 		.and_then(|v| v.as_string())
@@ -187,7 +185,7 @@ pub fn js_link(props: JsValue) -> JsValue {
 		let window = web_sys::window().expect("no window");
 		let history = window.history().expect("no history");
 		let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to_for_click));
-		window.dispatch_event(&web_sys::Event::new("popstate").unwrap()).ok();
+		window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
 	}) as Box<dyn Fn(web_sys::MouseEvent)>);
 	let onclick_fn: Function = onclick.as_ref().unchecked_ref::<Function>().clone();
 	onclick.forget();
@@ -219,7 +217,7 @@ pub fn js_use_navigate() -> JsValue {
 		let window = web_sys::window().expect("no window");
 		let history = window.history().expect("no history");
 		let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to));
-		window.dispatch_event(&web_sys::Event::new("popstate").unwrap()).ok();
+		window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
 	}) as Box<dyn Fn(String)>);
 	navigate.into_js_value()
 }

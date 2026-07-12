@@ -148,6 +148,7 @@ fn error_boundary_catches_child_throw_and_renders_fallback() {
 			let setter: Rc<dyn Fn(wasm_bindgen::JsValue)> = Rc::new(move |err| {
 				*caught.borrow_mut() = err.as_string();
 			});
+			// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
 			unsafe {
 				(*inst_ptr).error_setter = Some(setter);
 			}
@@ -203,6 +204,7 @@ fn error_boundary_still_cannot_catch_a_genuine_rust_panic() {
 			let setter: Rc<dyn Fn(wasm_bindgen::JsValue)> = Rc::new(move |err| {
 				*caught.borrow_mut() = err.as_string();
 			});
+			// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
 			unsafe {
 				(*inst_ptr).error_setter = Some(setter);
 			}
@@ -234,6 +236,7 @@ fn make_test_boundary(name: &'static str, caught: Rc<RefCell<Option<String>>>, m
 			let setter: Rc<dyn Fn(wasm_bindgen::JsValue)> = Rc::new(move |err| {
 				*caught_for_setter.borrow_mut() = err.as_string();
 			});
+			// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
 			unsafe {
 				(*inst_ptr).error_setter = Some(setter);
 			}

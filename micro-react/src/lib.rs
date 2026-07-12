@@ -1,6 +1,6 @@
-// micro-react: a React-like UI runtime in Rust/WASM.
-// See each module for its role: vnode, diff, hooks, context, events,
-// router, render, scheduler, bindings (the JS-facing surface).
+//! micro-react: a React-like UI runtime in Rust/WASM.
+//! See each module for its role: vnode, diff, hooks, context, events,
+//! router, render, scheduler, bindings (the JS-facing surface).
 
 #![allow(clippy::new_without_default)]
 #![allow(unused_variables)]

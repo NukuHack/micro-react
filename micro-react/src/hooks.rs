@@ -1,3 +1,7 @@
+//! React-style hooks (useState, useEffect, useMemo, etc.) backed by a
+//! per-component slot vector. Hook order must stay stable across renders,
+//! matching the same rule React itself imposes on hook calls.
+
 use std::{
 	cell::RefCell,
 	rc::{Rc, Weak},
@@ -166,20 +170,15 @@ pub fn current_boundary() -> Option<Weak<RefCell<ComponentInst>>> {
 /// has the right instance sitting in scope as `inst_rc`, so just use that
 /// directly instead of going through fragile ambient state.
 pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsValue) -> bool {
-	// Prefer `origin`'s own persisted `nearest_boundary`: this is what lets
-	// a component's later, *independent* re-render (its own setState firing
-	// outside of any boundary's active render pass) still find its
-	// ancestor boundary, since BOUNDARY_STACK itself would be empty in that
-	// situation (nothing is currently diffing there).
+	// Prefer `origin`'s own persisted `nearest_boundary`: this lets a later,
+	// independent re-render (its own setState) still find its ancestor
+	// boundary, since BOUNDARY_STACK would be empty in that situation.
 	let from_origin = origin.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
 
 	let target = from_origin.filter(|inst_rc| inst_rc.borrow().error_setter.is_some()).or_else(|| {
-		// Fall back to the dynamic call-stack view. This is what covers
-		// a first-ever render, where the failing component hasn't had a
-		// diff pass yet to populate `nearest_boundary` in the first
-		// place (it's still accurate here because we're still inside
-		// the ancestor boundary's own diff_node call, which is exactly
-		// the window BOUNDARY_STACK reflects).
+		// Fall back to the dynamic call-stack view: covers a first-ever
+		// render, where `nearest_boundary` isn't populated yet but we're
+		// still inside the ancestor boundary's own diff_node call.
 		BOUNDARY_STACK.with(|s| {
 			for weak in s.borrow().iter().rev() {
 				if let Some(inst_rc) = weak.upgrade() {
@@ -307,13 +306,13 @@ where
 		_ => panic!("hook type mismatch"),
 	};
 
-	let current = value_rc.borrow().downcast_ref::<S>().unwrap().clone();
+	let current = value_rc.borrow().downcast_ref::<S>().expect("state type set by this hook").clone();
 	let reducer = Rc::new(reducer);
 
 	let weak = current_weak();
 	let cell_for_dispatch = value_rc.clone();
 	let dispatch: Rc<dyn Fn(A)> = Rc::new(move |action: A| {
-		let old = cell_for_dispatch.borrow().downcast_ref::<S>().unwrap().clone();
+		let old = cell_for_dispatch.borrow().downcast_ref::<S>().expect("state type set by this hook").clone();
 		let next = reducer(old, action);
 		*cell_for_dispatch.borrow_mut() = Box::new(next);
 		enqueue_render(weak.clone());
@@ -420,7 +419,7 @@ pub fn use_memo<T: Clone + 'static>(factory: impl FnOnce() -> T, deps: Option<Ve
 	}
 
 	match &hooks_ref!(inst)[idx] {
-		HookSlot::Memo { value, .. } => value.downcast_ref::<T>().unwrap().clone(),
+		HookSlot::Memo { value, .. } => value.downcast_ref::<T>().expect("memo type set by this hook").clone(),
 		_ => panic!("hook type mismatch"),
 	}
 }

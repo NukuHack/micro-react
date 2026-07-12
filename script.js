@@ -1,18 +1,7 @@
 // ─── NOTE on html`` usage in this file ───
-// Every component below uses `html` only — no `h()` anywhere. Two authoring
-// rules the underlying tagged-template compiler needs to stay correct:
-//
-//   1. Attribute names are HTML attribute names, not JSX prop names:
-//      use `class` (not `className`), `onclick`/`onchange`/... (not
-//      `onClick`/`onChange`; case doesn't matter, they're normalized).
-//      `style` is a plain CSS-text string, not a JS object.
-//   2. Never self-close a non-void element or a component tag
-//      (`<${Comp} />`). HTML's parser only treats a handful of elements
-//      (input, br, img, hr, ...) as actually self-closing — for anything
-//      else, including our synthetic `<${Comp}>` tags, a trailing `/>` is
-//      silently ignored and the parser keeps the tag open, swallowing
-//      whatever comes next as its children. Always write the explicit
-//      closing tag: `<${Comp}></${Comp}>`.
+// Every component below uses `html` only, no `h()`.
+//  don't self-close a non-void element or component tag (`<${Comp} />`);
+//  write the explicit closing tag: `<${Comp}></${Comp}>`.
 
 // ─── THEME CONTEXT ───
 const ThemeCtx = createContext({ name: 'dark', label: 'Dark' });
@@ -358,17 +347,20 @@ function AboutPage() {
         <p style="line-height:1.7;color:var(--muted);font-size:.9rem">micro-react v3 absorbs the most impactful internals from Preact's source while staying under one self-contained file with zero build requirements. Drop it next to an HTML page, import it as an ES module, and you have a full component model with hooks, context, portals, lazy loading, error boundaries, and a built-in SPA router.</p>
       </div>
 
-      <div class="code-block"><span class="cm">// no build step needed
-</span><span class="kw">import</span> MicroReact <span class="kw">from</span> <span class="str">'./micro-react.js'</span>;
+<div class="code-block">
+<span class="cm">// no build step needed\n</span>
+<span class="kw">import</span> <span class="fn">initWasm</span>, * <span class="kw">as</span> MicroReact <span class="kw">from</span> <span class="str">'./micro-react.js'</span>;
 
-<span class="kw">const</span> { createElement: h, useState, render } = MicroReact;
+<span class="kw">const</span> { html, useState, render } = MicroReact;
+<span class="kw">await</span> <span class="fn">initWasm</span>();
 
 <span class="kw">function</span> <span class="fn">App</span>() {
   <span class="kw">const</span> [n, setN] = useState(<span class="num">0</span>);
-  <span class="kw">return</span> h(<span class="str">'button'</span>, { onClick: () => setN(n+<span class="num">1</span>) }, n);
+  <span class="kw">return</span> html<span class="str">\`&lt;button onclick="\${() =&gt; setN(n+<span class="num">1</span>)}"&gt;\${n}&lt;/button&gt;\`</span>;
 }
 
-render(h(<span class="fn">App</span>), document.getElementById(<span class="str">'root'</span>));</div>
+const __root = render(html<span class="str">\`&lt;\${<span class="fn">App</span>}&gt;&lt;/\${<span class="fn">App</span>}&gt;\`</span>, document.getElementById(<span class="str">'root'</span>));
+<span class="fn">window</span>.__root = __root;</div>
 
       <div class="feature-grid">
         ${features.map(f => html`

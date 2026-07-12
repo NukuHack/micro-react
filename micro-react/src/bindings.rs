@@ -1,4 +1,4 @@
-// wasm-bindgen public surface — the JS-callable exports.
+//! wasm-bindgen public surface — the JS-callable exports.
 
 use js_sys::{Array, Function, Object, Reflect};
 use std::cell::RefCell;
@@ -20,33 +20,15 @@ thread_local! {
 }
 
 // ─── VNode boundary-crossing slot map ───
-//
-// Previously, every VNode handed to JS was heap-allocated with
-// `Box::into_raw` and handed back with `Box::from_raw` on an opaque numeric
-// pointer. That's unsound at a boundary Rust doesn't control:
-//   - if the JS-side object is ever discarded without being consumed (an
-//     early return, a branch that never renders, a JS-side error before
-//     the value is read), the Box is never reclaimed -> permanent leak.
-//   - if the *same* JS object is ever read twice (stored in a variable and
-//     reused, a memoization bug), `Box::from_raw` runs twice on the same
-//     pointer -> double-free / use-after-free, i.e. undefined behavior.
-//
-// Fix: never expose a raw pointer to JS at all. Rust keeps the actual
-// VNode in a slot map behind an opaque `u64` id; JS only ever holds that
-// id. Consuming a vnode is `remove()`, which:
-//   - is safe to call twice: the second call finds nothing and returns a
-//     null vnode instead of touching freed memory.
-//   - turns "never consumed" from a leaked raw allocation into a stale
-//     HashMap entry, which is a real but bounded, observable leak we log,
-//     rather than memory corruption.
+// Raw Box::into_raw/from_raw pointers to JS are unsound (double-read ->
+// double-free). VNodes instead live in a slot map keyed by opaque `u64`
+// id; remove() is safe to call twice, turning a stale read into a no-op.
 thread_local! {
 	static VNODE_STORE: RefCell<std::collections::HashMap<u64, VNode>> =
 		RefCell::new(std::collections::HashMap::new());
 	static VNODE_NEXT_ID: RefCell<u64> = const { RefCell::new(1) };
-	// Coarse leak guard: if the store grows past this, something upstream
-	// is producing vnodes that never get consumed. We don't have a way to
-	// free them safely (we don't know they're unreachable), so we just
-	// surface it loudly instead of growing forever silently.
+	// Coarse leak guard: past this size we can't safely reclaim unreachable
+	// entries, so we surface the growth loudly instead of failing silently.
 	static VNODE_LEAK_WARNED: RefCell<bool> = const { RefCell::new(false) };
 }
 
@@ -255,7 +237,7 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 		}
 		builder.children(child_vnodes).build()
 	} else if type_.is_function() {
-		let fn_: Function = type_.clone().dyn_into().unwrap();
+		let fn_: Function = type_.clone().dyn_into().expect("type_.is_function() checked above");
 		let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
 
 		VNode::component(
@@ -268,12 +250,9 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 				}
 				match fn_.call1(&JsValue::NULL, &js_props) {
 					Ok(result) => Ok(js_to_vnode(&result).unwrap_or_else(|_| VNode::null())),
-					// A thrown JS exception becomes a plain `Err` — the same
-					// path a Rust component uses to "throw" directly. It's
-					// diff_component/rerender_component (see diff.rs) that
-					// walk up to the nearest ErrorBoundary from here, exactly
-					// like React's reconciler does when a component throws
-					// during render — not this call site.
+					// A thrown JS exception becomes a plain `Err`, the same path a
+					// Rust component uses to "throw" directly; diff_component /
+					// rerender_component (diff.rs) walk up to the nearest boundary.
 					Err(err) => Err(err),
 				}
 			}),
@@ -427,7 +406,7 @@ pub fn js_use_ref(initial: JsValue) -> Object {
 
 	if !initialized {
 		let obj = Object::new();
-		Reflect::set(&obj, &"current".into(), &initial).unwrap();
+		Reflect::set(&obj, &"current".into(), &initial).expect("setting a plain-object property cannot fail");
 		let obj_val: JsValue = obj.clone().into();
 		set_init(true);
 		set_ref(obj_val);
@@ -436,7 +415,7 @@ pub fn js_use_ref(initial: JsValue) -> Object {
 
 	ref_obj.dyn_into::<Object>().unwrap_or_else(|_| {
 		let obj = Object::new();
-		Reflect::set(&obj, &"current".into(), &initial).unwrap();
+		Reflect::set(&obj, &"current".into(), &initial).expect("setting a plain-object property cannot fail");
 		obj
 	})
 }
@@ -492,7 +471,7 @@ pub fn js_create_context(default_value: JsValue) -> Result<JsValue, JsValue> {
 		let value = ctx_consumer.current_value();
 		let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 		if children.is_function() {
-			let f: Function = children.dyn_into().unwrap();
+			let f: Function = children.dyn_into().expect("children.is_function() checked above");
 			f.call1(&JsValue::NULL, &value).unwrap_or(JsValue::NULL)
 		} else {
 			JsValue::NULL
@@ -627,6 +606,7 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 				let _ = f.call1(&JsValue::NULL, &err);
 			}
 		});
+		// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
 		unsafe {
 			(*inst_ptr).error_setter = Some(rc_setter);
 		}
@@ -636,7 +616,7 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 		crate::console_error!("[micro-react] ErrorBoundary caught: {}", stringify_thrown(&error));
 		let fallback = Reflect::get(&props, &"fallback".into()).unwrap_or(JsValue::NULL);
 		if fallback.is_function() {
-			let f: Function = fallback.dyn_into().unwrap();
+			let f: Function = fallback.dyn_into().expect("fallback.is_function() checked above");
 			return f.call1(&JsValue::NULL, &error).unwrap_or(JsValue::NULL);
 		}
 		return fallback;
@@ -683,11 +663,9 @@ pub(crate) fn js_to_vnode(v: &JsValue) -> Result<VNode, JsValue> {
 		// integer range for any realistic run, so this round-trip is exact.
 		let id = n as u64;
 		return Ok(take_vnode(id).unwrap_or_else(|| {
-			// Either an unknown id, or (more likely) this exact JS vnode
-			// object was already consumed once before (double-read). We
-			// can't recover the original vnode — it's gone — but unlike
-			// the old raw-pointer version this is a safe, loud no-op
-			// instead of a use-after-free.
+			// Unknown id, or (more likely) this JS vnode was already consumed
+			// once (double-read). Unlike the old raw-pointer version this is
+			// a safe, loud no-op instead of a use-after-free.
 			crate::console_error!(
 				"[micro-react] vnode id {} was already consumed or is unknown \
                  (the same rendered value was read more than once). Returning \
@@ -742,7 +720,7 @@ pub(crate) fn js_val_to_prop_val(v: &JsValue) -> PropVal {
 		return PropVal::Str(s);
 	}
 	if v.is_function() {
-		let f: Function = v.clone().dyn_into().unwrap();
+		let f: Function = v.clone().dyn_into().expect("v.is_function() checked above");
 		return PropVal::Callback(JsCallback(f));
 	}
 	// Plain objects and arrays (style objects, routes maps, etc.) — keep
@@ -770,9 +748,7 @@ pub(crate) fn props_to_js_object(props: &Props) -> JsValue {
 }
 
 // ─── Tests for the VNode slot map (the fix for the raw-pointer bug) ───
-//
-// These exercise pure Rust logic with no JS/DOM involved, so they run with
-// a plain `cargo test --lib` (no wasm-pack / headless browser needed).
+// Pure Rust logic, no JS/DOM involved, so `cargo test --lib` covers these.
 #[cfg(test)]
 mod vnode_store_tests {
 	use super::*;
@@ -797,10 +773,9 @@ mod vnode_store_tests {
 
 	#[test]
 	fn double_consume_is_safe_not_ub() {
-		// This is the core regression test for the bug: reading the same
-		// "JS vnode" twice must never touch freed memory. With the old
-		// Box::from_raw approach this would be a double-free; here the
-		// second take() is just a normal, safe `None`.
+		// Core regression test: reading the same "JS vnode" twice must never
+		// touch freed memory. Old Box::from_raw approach double-freed here;
+		// the second take() is now just a normal, safe `None`.
 		reset_store();
 		let id = store_vnode(VNode::text("once"));
 		assert!(take_vnode(id).is_some(), "first take should succeed");

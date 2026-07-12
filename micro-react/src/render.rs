@@ -1,4 +1,4 @@
-// render() creates and mounts a root — mirrors the React 18 root API.
+//! render() creates and mounts a root — mirrors the React 18 root API.
 
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, Node};
