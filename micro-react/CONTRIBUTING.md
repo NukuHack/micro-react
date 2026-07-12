@@ -5,9 +5,8 @@ Thanks for your interest in contributing. This document outlines the conventions
 ## Getting Started
 
 1. Fork the repository and clone it locally.
-2. Install Rust via `rustup` and run `cargo build` to ensure everything compiles.
-3. Run `cargo test` to verify all tests pass before making changes.
-4. Create a branch with a descriptive name: `feat/short-description` or `fix/bug-name`.
+2. Install Rust via `rustup` and run `build.sh` to ensure everything compiles and to verify all tests pass before making changes.
+3. Create a branch with a descriptive name: `feat/short-description` or `fix/bug-name`.
 
 ## Code Style
 
@@ -29,7 +28,7 @@ warnings as errors, so a PR with lint warnings will not pass.
 
 > A `check.sh` script is provided in the repo root to run `cargo fmt` and
 > `cargo clippy` together, plus soft warnings for files or lines that exceed
-> the length guidelines below.[^1]
+> the length guidelines below.
 
 ### Variables and Types
 
@@ -131,8 +130,3 @@ Please be respectful and constructive in all interactions.
 
 By contributing, you agree that your code will be licensed under the same terms
 as the rest of the project. See `LICENSE` for details.
-
-[^1]: `./check.sh` runs `cargo fmt`, `cargo clippy -- -D warnings`, and a small
-    line/file-length scan that prints warnings (not errors) for `.rs` files
-    over 500 lines or lines over 150 characters. It's a convenience wrapper,
-    not a CI gate — CI runs the same fmt/clippy checks independently.
