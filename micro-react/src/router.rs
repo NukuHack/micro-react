@@ -157,14 +157,22 @@ pub fn js_router(props: JsValue) -> JsValue {
     }
 }
 
-/// `Link({ to, className, children })` — an anchor that performs client-side
-/// navigation via `history.pushState` + a synthetic `popstate` event.
+/// `Link({ to, class/className, children })` — an anchor that performs
+/// client-side navigation via `history.pushState` + a synthetic `popstate`
+/// event.
 #[wasm_bindgen(js_name = Link)]
 pub fn js_link(props: JsValue) -> JsValue {
     let to = Reflect::get(&props, &"to".into())
         .ok().and_then(|v| v.as_string()).unwrap_or_default();
-    let class_name = Reflect::get(&props, &"className".into())
-        .ok().and_then(|v| v.as_string());
+    // `html\`\`` authoring uses real HTML attribute names (`class`, not
+    // `className` — see the convention documented at the top of script.js),
+    // so that's the name Link needs to honor for `<${Link} class="...">` to
+    // actually reach the rendered `<a>`. `className` is kept as a fallback
+    // for `h()`-style JSX callers, which pass real JS prop names instead.
+    let class_name = Reflect::get(&props, &"class".into())
+        .ok().and_then(|v| v.as_string())
+        .or_else(|| Reflect::get(&props, &"className".into())
+            .ok().and_then(|v| v.as_string()));
     let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 
     let to_for_click = to.clone();

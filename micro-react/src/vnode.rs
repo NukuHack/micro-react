@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use wasm_bindgen::{prelude::*, JsValue};
+use wasm_bindgen::JsValue;
 use web_sys::Element;
 
 // ── monotonic vnode id ──

@@ -3,6 +3,7 @@
 // it on every call, so callbacks/refs/keys survive intact.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use js_sys::{Array, Object, Reflect, WeakMap};
 use wasm_bindgen::prelude::*;
@@ -288,7 +289,110 @@ const CASED_ATTR_NAMES: &[(&str, &str)] = &[
     ("zoomandpan", "zoomAndPan"),
 ];
 
-fn normalize_attr_name(lowered: &str) -> String {
+/// Scans the *pre-parse* sentinel HTML string for attribute-name tokens
+/// (`name=` inside a tag) and records each one's original casing, keyed by
+/// its lowercased form. `DomParser` unconditionally lowercases attribute
+/// names when it parses this string into a DOM tree (that's just how
+/// browsers parse HTML), so by the time `compile_node` reads attributes
+/// back off the parsed `Element` via `attributes()`, any camelCase name —
+/// `setThemeIdx`, `shouldExplode`, any component prop, not just the
+/// `class`/`onclick` DOM ones — has already been flattened to lowercase.
+/// This map lets `normalize_attr_name` undo that damage using the literal
+/// text the author actually wrote, instead of only handling the one
+/// hardcoded `on...Capture` case.
+///
+/// Attribute *names* in `html\`\`` are always static text (only values can
+/// be holes), so scanning the concatenated static HTML is sufficient — no
+/// need to look at the live substituted values.
+fn build_case_map(html: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let chars: Vec<char> = html.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut in_tag = false;
+    // Quote char we're currently inside an attribute value for, if any —
+    // needed so a `>` or `=` inside a quoted value (`title="a > b"`,
+    // `class="x=y"`) can't be mistaken for tag-end or a name/value split.
+    let mut in_quote: Option<char> = None;
+
+    while i < n {
+        let c = chars[i];
+
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if !in_tag {
+            if c == '<' {
+                // Skip comments/doctype-ish `<!...>` — they have no attrs.
+                if i + 1 < n && chars[i + 1] == '!' {
+                    while i < n && chars[i] != '>' {
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                }
+                in_tag = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' || c == '\'' {
+            in_quote = Some(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '>' {
+            in_tag = false;
+            i += 1;
+            continue;
+        }
+
+        if c.is_ascii_alphabetic() {
+            let start = i;
+            let mut j = i;
+            while j < n
+                && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':'))
+            {
+                j += 1;
+            }
+            let mut k = j;
+            while k < n && chars[k].is_whitespace() {
+                k += 1;
+            }
+            if k < n && chars[k] == '=' {
+                let name: String = chars[start..j].iter().collect();
+                let lower = name.to_ascii_lowercase();
+                if name != lower {
+                    map.insert(lower, name);
+                }
+            }
+            i = j;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    map
+}
+
+fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> String {
+    // Prefer the casing the author actually wrote at this call-site — it's
+    // ground truth, reconstructed before the HTML parser had a chance to
+    // lowercase it. Takes priority over the generic SVG/event heuristics
+    // below, which only exist as a fallback for when the source itself
+    // used lowercase (e.g. deliberately-lowercase `viewbox`).
+    if let Some(original) = case_map.get(lowered) {
+        return original.clone();
+    }
+
     for (from, to) in CASED_ATTR_NAMES {
         if *from == lowered {
             return (*to).to_string();
@@ -486,7 +590,7 @@ fn attr_value_template(raw: &str) -> AttrValueTemplate {
     }
 }
 
-fn compile_node(node: &Node) -> Option<ChildTemplate> {
+fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<ChildTemplate> {
     match node.node_type() {
         Node::TEXT_NODE => {
             let text = node.text_content().unwrap_or_default();
@@ -531,7 +635,7 @@ fn compile_node(node: &Node) -> Option<ChildTemplate> {
             let attrs = elem.attributes();
             for i in 0..attrs.length() {
                 let Some(a) = attrs.item(i) else { continue };
-                let name = normalize_attr_name(&a.name());
+                let name = normalize_attr_name(&a.name(), case_map);
                 let value_tpl = attr_value_template(&a.value());
 
                 if name == "key" {
@@ -553,7 +657,7 @@ fn compile_node(node: &Node) -> Option<ChildTemplate> {
             let child_nodes = node.child_nodes();
             for i in 0..child_nodes.length() {
                 if let Some(c) = child_nodes.item(i) {
-                    if let Some(ct) = compile_node(&c) {
+                    if let Some(ct) = compile_node(&c, case_map) {
                         children.push(ct);
                     }
                 }
@@ -641,6 +745,7 @@ fn first_tag_name(html: &str) -> Option<String> {
 fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
     let html = build_sentinel_html(statics);
     let html = expand_self_closing_tags(&html);
+    let case_map = build_case_map(&html);
 
     let (wrap_prefix, wrap_suffix, extra_depth) = first_tag_name(&html)
         .map(|tag| table_context_wrapper(&tag))
@@ -663,7 +768,7 @@ fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
     let child_nodes = root.child_nodes();
     for i in 0..child_nodes.length() {
         if let Some(c) = child_nodes.item(i) {
-            if let Some(ct) = compile_node(&c) {
+            if let Some(ct) = compile_node(&c, &case_map) {
                 roots.push(ct);
             }
         }
@@ -997,72 +1102,126 @@ mod pure_logic_tests {
         assert_eq!(expand_self_closing_tags("just text, no tags"), "just text, no tags");
     }
 
+    // ── build_case_map / normalize_attr_name case restoration ──
+    //
+    // Regression coverage for the bug where a camelCase *component* prop
+    // written in a `html\`\`` template (e.g. `setThemeIdx="${fn}"`) got
+    // silently flattened to `setthemeidx` because `DomParser` lowercases
+    // attribute names, and the old `normalize_attr_name` only restored
+    // casing for a hardcoded table of DOM props plus `on...Capture` event
+    // names. `build_case_map` recovers the author's original casing from
+    // the pre-parse HTML text itself, so *any* camelCase name — not just
+    // known DOM/event ones — survives.
+
+    #[test]
+    fn case_map_records_camel_case_attr_names() {
+        let map = build_case_map(r#"<mr-slot-0 themeidx="x" setThemeIdx="y"></mr-slot-0>"#);
+        assert_eq!(map.get("setthemeidx").map(String::as_str), Some("setThemeIdx"));
+        // Already-lowercase names aren't recorded — nothing to restore, and
+        // leaving them out lets the SVG/event fallback table still apply.
+        assert_eq!(map.get("themeidx"), None);
+    }
+
+    #[test]
+    fn case_map_ignores_gt_and_eq_inside_quoted_values() {
+        // Neither the `>` nor the `=` inside these quoted values should be
+        // mistaken for tag-end or a bogus name/value split.
+        let map = build_case_map(r#"<div title="a > b" setThemeIdx="x=y"></div>"#);
+        assert_eq!(map.get("setthemeidx").map(String::as_str), Some("setThemeIdx"));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn case_map_ignores_text_content_and_comments() {
+        let map = build_case_map("<!-- setThemeIdx=\"nope\" --><p>shouldExplode=\"also nope\"</p>");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn normalize_attr_name_prefers_case_map_for_component_props() {
+        let mut map = HashMap::new();
+        map.insert("setthemeidx".to_string(), "setThemeIdx".to_string());
+        map.insert("shouldexplode".to_string(), "shouldExplode".to_string());
+        assert_eq!(normalize_attr_name("setthemeidx", &map), "setThemeIdx");
+        assert_eq!(normalize_attr_name("shouldexplode", &map), "shouldExplode");
+    }
+
+    #[test]
+    fn normalize_attr_name_case_map_does_not_break_svg_auto_correction() {
+        // A deliberately-lowercase SVG attr like `viewbox` must still get
+        // auto-corrected to `viewBox` via CASED_ATTR_NAMES — the case map
+        // only ever holds names that had *some* uppercase in the source, so
+        // it can't accidentally shadow this fallback.
+        let map = build_case_map(r#"<svg viewbox="0 0 1 1"></svg>"#);
+        assert_eq!(normalize_attr_name("viewbox", &map), "viewBox");
+    }
+
     // ── normalize_attr_name ──
 
     #[test]
     fn restores_class_name() {
-        assert_eq!(normalize_attr_name("classname"), "className");
+        assert_eq!(normalize_attr_name("classname", &HashMap::new()), "className");
     }
 
     #[test]
     fn restores_html_for() {
-        assert_eq!(normalize_attr_name("htmlfor"), "htmlFor");
+        assert_eq!(normalize_attr_name("htmlfor", &HashMap::new()), "htmlFor");
     }
 
     #[test]
     fn restores_dangerously_set_inner_html() {
         assert_eq!(
-            normalize_attr_name("dangerouslysetinnerhtml"),
+            normalize_attr_name("dangerouslysetinnerhtml", &HashMap::new()),
             "dangerouslySetInnerHTML"
         );
     }
 
     #[test]
     fn restores_misc_camel_case_dom_props() {
-        assert_eq!(normalize_attr_name("tabindex"), "tabIndex");
-        assert_eq!(normalize_attr_name("readonly"), "readOnly");
-        assert_eq!(normalize_attr_name("colspan"), "colSpan");
-        assert_eq!(normalize_attr_name("srcset"), "srcSet");
+        assert_eq!(normalize_attr_name("tabindex", &HashMap::new()), "tabIndex");
+        assert_eq!(normalize_attr_name("readonly", &HashMap::new()), "readOnly");
+        assert_eq!(normalize_attr_name("colspan", &HashMap::new()), "colSpan");
+        assert_eq!(normalize_attr_name("srcset", &HashMap::new()), "srcSet");
     }
 
     #[test]
     fn restores_capture_suffix_on_event_props() {
-        assert_eq!(normalize_attr_name("onclickcapture"), "onClickCapture");
+        assert_eq!(normalize_attr_name("onclickcapture", &HashMap::new()), "onClickCapture");
         // Only the leading letter of the collapsed event name can be
         // cosmetically restored (mid-word boundaries like "Enter" in
         // "mouseenter" are unrecoverable from lowercase alone) — but the
         // "Capture" suffix, which is the part that's functionally load
         // bearing for parse_event_prop, is always restored exactly.
-        assert_eq!(normalize_attr_name("onmouseentercapture"), "onMouseenterCapture");
+        assert_eq!(normalize_attr_name("onmouseentercapture", &HashMap::new()), "onMouseenterCapture");
     }
 
     #[test]
     fn plain_event_props_are_left_lowercase() {
         // No "Capture" suffix to restore; parse_event_prop lowercases the
         // event name anyway, so plain lowercase is already correct.
-        assert_eq!(normalize_attr_name("onclick"), "onclick");
-        assert_eq!(normalize_attr_name("onmouseenter"), "onmouseenter");
+        assert_eq!(normalize_attr_name("onclick", &HashMap::new()), "onclick");
+        assert_eq!(normalize_attr_name("onmouseenter", &HashMap::new()), "onmouseenter");
     }
 
     #[test]
     fn ordinary_lowercase_html_attrs_pass_through() {
-        assert_eq!(normalize_attr_name("class"), "class");
-        assert_eq!(normalize_attr_name("id"), "id");
-        assert_eq!(normalize_attr_name("disabled"), "disabled");
-        assert_eq!(normalize_attr_name("placeholder"), "placeholder");
-        assert_eq!(normalize_attr_name("data-foo"), "data-foo");
+        assert_eq!(normalize_attr_name("class", &HashMap::new()), "class");
+        assert_eq!(normalize_attr_name("id", &HashMap::new()), "id");
+        assert_eq!(normalize_attr_name("disabled", &HashMap::new()), "disabled");
+        assert_eq!(normalize_attr_name("placeholder", &HashMap::new()), "placeholder");
+        assert_eq!(normalize_attr_name("data-foo", &HashMap::new()), "data-foo");
     }
 
     #[test]
     fn bare_on_with_nothing_after_is_left_alone() {
         // Not a real event prop (no event name) — shouldn't be mangled by
         // the capture-suffix logic.
-        assert_eq!(normalize_attr_name("on"), "on");
+        assert_eq!(normalize_attr_name("on", &HashMap::new()), "on");
     }
 
     #[test]
     fn bare_oncapture_with_no_event_name_is_left_alone() {
-        assert_eq!(normalize_attr_name("oncapture"), "oncapture");
+        assert_eq!(normalize_attr_name("oncapture", &HashMap::new()), "oncapture");
     }
 
     // ── first_tag_name / table_context_wrapper ──

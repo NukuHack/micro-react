@@ -16,7 +16,6 @@ use crate::events::{set_event_handler, parse_event_prop};
 
 const SVG_NS:  &str = "http://www.w3.org/2000/svg";
 const MATH_NS: &str = "http://www.w3.org/1998/Math/MathML";
-const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
 
 // ─── Internal component tree node (wraps ComponentInst in Rc<RefCell>) ───
 use std::cell::RefCell;
