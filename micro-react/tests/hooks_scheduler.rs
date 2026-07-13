@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen_test::*;
 
-use micro_react::context::{use_context, Context};
+use micro_react::context::{Context, use_context};
 use micro_react::hooks::*;
 use micro_react::render::Root;
 use micro_react::scheduler::flush_rerenders;

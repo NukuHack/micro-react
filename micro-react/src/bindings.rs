@@ -3,11 +3,11 @@
 use js_sys::{Array, Function, Object, Reflect};
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::Element;
 
 use crate::context::use_context;
-use crate::hooks::{current_inst, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state, use_state_cell, DepVal};
+use crate::hooks::{DepVal, current_inst, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state, use_state_cell};
 use crate::render::Root;
 use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode, VNodeInner};
 
@@ -209,10 +209,10 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 
 	let mut child_vnodes: Vec<VNode> = Vec::new();
 	for child in children.iter() {
-		if let Ok(vn) = js_to_vnode(&child) {
-			if !matches!(vn.inner, VNodeInner::Null) {
-				child_vnodes.push(vn);
-			}
+		if let Ok(vn) = js_to_vnode(&child)
+			&& !matches!(vn.inner, VNodeInner::Null)
+		{
+			child_vnodes.push(vn);
 		}
 	}
 
@@ -514,10 +514,8 @@ pub fn js_memo(component: &Function, compare: JsValue) -> Result<JsValue, JsValu
 			false
 		};
 
-		if should_skip {
-			if let Some(vn) = prev_result.borrow().as_ref() {
-				return vnode_to_js(vn.clone()).unwrap_or(JsValue::NULL);
-			}
+		if should_skip && let Some(vn) = prev_result.borrow().as_ref() {
+			return vnode_to_js(vn.clone()).unwrap_or(JsValue::NULL);
 		}
 
 		let result = component.call1(&JsValue::NULL, &props).unwrap_or(JsValue::NULL);

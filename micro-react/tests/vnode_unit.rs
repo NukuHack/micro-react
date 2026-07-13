@@ -10,7 +10,7 @@
 use std::rc::Rc;
 use wasm_bindgen_test::*;
 
-use micro_react::vnode::{next_id, Children, ComponentFn, NodeRef, PropVal, Props, Template, VNode, VNodeInner};
+use micro_react::vnode::{Children, ComponentFn, NodeRef, PropVal, Props, Template, VNode, VNodeInner, next_id};
 
 wasm_bindgen_test_configure!(run_in_browser);
 

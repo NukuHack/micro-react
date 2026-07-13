@@ -84,8 +84,9 @@ fn render_jsx_attrs(chars: &[char], from: usize) -> Result<(String, usize, bool)
 			}
 			'{' => {
 				let close = find_matching_brace(chars, i).ok_or(JsxError::UnbalancedHole(i))?;
+				let inner: String = chars[i + 1..close].iter().collect();
 				out.push_str("${");
-				out.extend(&chars[i + 1..close]);
+				out.push_str(&transpile_jsx_str(&inner)?);
 				out.push('}');
 				i = close + 1;
 			}
@@ -113,8 +114,9 @@ fn parse_children(chars: &[char], from: usize, tag_name: &str, is_fragment: bool
 
 		if c == '{' {
 			let close = find_matching_brace(chars, i).ok_or(JsxError::UnbalancedHole(i))?;
+			let inner: String = chars[i + 1..close].iter().collect();
 			out.push_str("${");
-			out.extend(&chars[i + 1..close]);
+			out.push_str(&transpile_jsx_str(&inner)?);
 			out.push('}');
 			i = close + 1;
 			continue;

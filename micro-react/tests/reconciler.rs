@@ -241,11 +241,7 @@ fn make_test_boundary(name: &'static str, caught: Rc<RefCell<Option<String>>>, m
 				(*inst_ptr).error_setter = Some(setter);
 			}
 
-			if caught.borrow().is_some() {
-				VNode::tag("div").attr("class", "fallback").text("something broke").build()
-			} else {
-				make_child()
-			}
+			if caught.borrow().is_some() { VNode::tag("div").attr("class", "fallback").text("something broke").build() } else { make_child() }
 		}),
 		Vec::new(),
 	)

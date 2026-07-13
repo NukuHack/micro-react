@@ -4,7 +4,7 @@
 
 use js_sys::{Function, Object, Reflect};
 use std::collections::HashMap;
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::bindings::{js_to_vnode, vnode_to_js};
 use crate::context::Context;
@@ -123,20 +123,19 @@ pub fn js_router(props: JsValue) -> JsValue {
 	let mut matched_fn: Option<Function> = None;
 	let mut params: HashMap<String, String> = HashMap::new();
 
-	if routes_obj.is_object() {
-		if let Some(obj) = routes_obj.dyn_ref::<Object>() {
-			for key in Object::keys(obj).iter() {
-				let pattern_str = key.as_string().unwrap_or_default();
-				let pattern = Pattern::compile(&pattern_str);
-				if let Some(p) = pattern.matches(&path) {
-					if let Ok(val) = Reflect::get(&routes_obj, &key) {
-						if val.is_function() {
-							matched_fn = val.dyn_into().ok();
-							params = p;
-							break;
-						}
-					}
-				}
+	if routes_obj.is_object()
+		&& let Some(obj) = routes_obj.dyn_ref::<Object>()
+	{
+		for key in Object::keys(obj).iter() {
+			let pattern_str = key.as_string().unwrap_or_default();
+			let pattern = Pattern::compile(&pattern_str);
+			if let Some(p) = pattern.matches(&path)
+				&& let Ok(val) = Reflect::get(&routes_obj, &key)
+				&& val.is_function()
+			{
+				matched_fn = val.dyn_into().ok();
+				params = p;
+				break;
 			}
 		}
 	}
@@ -195,10 +194,10 @@ pub fn js_link(props: JsValue) -> JsValue {
 		builder = builder.attr("className", cn.as_str());
 	}
 
-	if let Ok(child_vn) = js_to_vnode(&children) {
-		if !matches!(child_vn.inner, VNodeInner::Null) {
-			builder = builder.child(child_vn);
-		}
+	if let Ok(child_vn) = js_to_vnode(&children)
+		&& !matches!(child_vn.inner, VNodeInner::Null)
+	{
+		builder = builder.child(child_vn);
 	}
 
 	vnode_to_js(builder.build()).unwrap_or(JsValue::NULL)

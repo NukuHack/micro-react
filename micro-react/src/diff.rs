@@ -4,12 +4,12 @@
 
 use js_sys::{Function, Object, Reflect};
 use std::rc::Rc;
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::{Document, Element, Node, Text};
 
 use crate::events::{parse_event_prop, set_event_handler};
-use crate::hooks::{unmount_inst, with_inst, ComponentInst};
-use crate::vnode::{Children, ComponentFn, NodeRef, PropVal, Props, VNode, VNodeInner, FLAG_INSERT, FLAG_MATCHED};
+use crate::hooks::{ComponentInst, unmount_inst, with_inst};
+use crate::vnode::{Children, ComponentFn, FLAG_INSERT, FLAG_MATCHED, NodeRef, PropVal, Props, VNode, VNodeInner};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 const MATH_NS: &str = "http://www.w3.org/1998/Math/MathML";
@@ -79,10 +79,10 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 		VNodeInner::Null => {
 			// A component can render `null` after a throw (createElement
 			// substitutes VNode::null() on error). Unmount any old subtree properly instead of just dropping our _dom, so hooks/effects don't leak.
-			if let Some(old) = old_vnode {
-				if !matches!(old.inner, VNodeInner::Null) {
-					unmount_vnode(old, false);
-				}
+			if let Some(old) = old_vnode
+				&& !matches!(old.inner, VNodeInner::Null)
+			{
+				unmount_vnode(old, false);
 			}
 			new_vnode._dom = None;
 			Ok(None)
@@ -91,16 +91,15 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 		VNodeInner::Text(text) => {
 			let text = text.clone();
 			// Reuse existing text node if possible
-			if let Some(old) = old_vnode {
-				if let Some(existing) = &old._dom {
-					if let Ok(txt) = existing.clone().dyn_into::<Text>() {
-						if txt.data() != text {
-							txt.set_data(&text);
-						}
-						new_vnode._dom = Some(txt.into());
-						return Ok(new_vnode._dom.clone());
-					}
+			if let Some(old) = old_vnode
+				&& let Some(existing) = &old._dom
+				&& let Ok(txt) = existing.clone().dyn_into::<Text>()
+			{
+				if txt.data() != text {
+					txt.set_data(&text);
 				}
+				new_vnode._dom = Some(txt.into());
+				return Ok(new_vnode._dom.clone());
 			}
 			let doc = document();
 			let txt = doc.create_text_node(&text);
@@ -199,11 +198,7 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 				unmount_vnode(old, true);
 			}
 			let doc = document();
-			if let Some(ns) = ns_uri(&ns) {
-				doc.create_element_ns(Some(ns), &tag)?
-			} else {
-				doc.create_element(&tag)?
-			}
+			if let Some(ns) = ns_uri(&ns) { doc.create_element_ns(Some(ns), &tag)? } else { doc.create_element(&tag)? }
 		}
 	};
 
@@ -639,10 +634,8 @@ pub fn diff_children(
 		let already_attached = cv._dom.as_ref().and_then(|d| d.parent_node()).is_some_and(|p| p.is_same_node(Some(parent_dom)));
 		let should_insert = (cv._flags & FLAG_INSERT) != 0 || !already_attached;
 
-		if should_insert {
-			if let Some(dom) = &cv._dom {
-				parent_dom.insert_before(dom, old_dom.as_ref())?;
-			}
+		if should_insert && let Some(dom) = &cv._dom {
+			parent_dom.insert_before(dom, old_dom.as_ref())?;
 		}
 		if let Some(dom) = &cv._dom {
 			old_dom = dom.next_sibling();
@@ -668,10 +661,12 @@ fn find_match(new_vn: &VNode, old_children: &[VNode], skewed_index: usize, match
 	let type_ = new_vn.type_tag();
 
 	// Check centred position first
-	if let Some(old) = old_children.get(skewed_index) {
-		if !matched[skewed_index] && old.key() == key && old.type_tag() == type_ {
-			return skewed_index as i32;
-		}
+	if let Some(old) = old_children.get(skewed_index)
+		&& !matched[skewed_index]
+		&& old.key() == key
+		&& old.type_tag() == type_
+	{
+		return skewed_index as i32;
 	}
 
 	// Bidirectional search
@@ -740,12 +735,11 @@ pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
 		_ => {}
 	}
 
-	if !skip_remove {
-		if let Some(dom) = &vnode._dom {
-			if let Some(parent) = dom.parent_node() {
-				let _ = parent.remove_child(dom);
-			}
-		}
+	if !skip_remove
+		&& let Some(dom) = &vnode._dom
+		&& let Some(parent) = dom.parent_node()
+	{
+		let _ = parent.remove_child(dom);
 	}
 }
 

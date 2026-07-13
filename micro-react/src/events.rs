@@ -3,7 +3,7 @@
 //! (element, event, capture) compares attach time to the event's timeStamp.
 
 use js_sys::{Function, Reflect};
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 
 /// Property names on the DOM element for the listeners map.
 const LISTENERS_KEY: &str = "__mrListeners";
@@ -47,10 +47,11 @@ pub fn set_event_handler(elem: &web_sys::Element, event_name: &str, capture: boo
 			if old_handler.is_some() {
 				let proxy_key = format!("__proxy_{}", key);
 				if let Ok(proxy_val) = Reflect::get(listeners.as_ref(), &JsValue::from_str(&proxy_key)) {
-					if !proxy_val.is_null() && !proxy_val.is_undefined() {
-						if let Ok(proxy_fn) = proxy_val.dyn_into::<Function>() {
-							let _ = elem.remove_event_listener_with_callback_and_bool(event_name, &proxy_fn, capture);
-						}
+					if !proxy_val.is_null()
+						&& !proxy_val.is_undefined()
+						&& let Ok(proxy_fn) = proxy_val.dyn_into::<Function>()
+					{
+						let _ = elem.remove_event_listener_with_callback_and_bool(event_name, &proxy_fn, capture);
 					}
 					let _ = Reflect::delete_property(&listeners, &JsValue::from_str(&proxy_key));
 				}
@@ -73,11 +74,7 @@ fn ensure_listeners(elem: &JsValue) -> js_sys::Object {
 }
 
 fn listener_key(event_name: &str, capture: bool) -> String {
-	if capture {
-		format!("{}_cap", event_name)
-	} else {
-		event_name.to_string()
-	}
+	if capture { format!("{}_cap", event_name) } else { event_name.to_string() }
 }
 
 /// Create a proxy closure for the given phase.

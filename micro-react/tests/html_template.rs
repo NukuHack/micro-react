@@ -21,7 +21,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::*;
 
-use micro_react::bindings::{render as mount_root, JsRoot};
+use micro_react::bindings::{JsRoot, render as mount_root};
 use micro_react::html_template::html_template;
 
 wasm_bindgen_test_configure!(run_in_browser);

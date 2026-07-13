@@ -8,7 +8,7 @@ use std::{
 };
 use wasm_bindgen::prelude::*;
 
-use crate::scheduler::{enqueue_effect, enqueue_layout_effect, enqueue_render, EffectSlot};
+use crate::scheduler::{EffectSlot, enqueue_effect, enqueue_layout_effect, enqueue_render};
 use crate::vnode::{ComponentFn, Props, VNode};
 
 // ─── ComponentInst ───
@@ -181,10 +181,10 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 		// still inside the ancestor boundary's own diff_node call.
 		BOUNDARY_STACK.with(|s| {
 			for weak in s.borrow().iter().rev() {
-				if let Some(inst_rc) = weak.upgrade() {
-					if inst_rc.borrow().error_setter.is_some() {
-						return Some(inst_rc);
-					}
+				if let Some(inst_rc) = weak.upgrade()
+					&& inst_rc.borrow().error_setter.is_some()
+				{
+					return Some(inst_rc);
 				}
 			}
 			None
@@ -212,9 +212,9 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 // ─── helper: get &hooks safely through raw ptr ───
 // SAFETY: WASM is single-threaded; inst is valid for the duration of a render.
 macro_rules! hooks_ref {
-    ($inst:expr) => {
-        unsafe { &(*$inst).hooks }
-    };
+	($inst:expr) => {
+		unsafe { &(*$inst).hooks }
+	};
 }
 #[inline(always)]
 unsafe fn hooks_get_mut(inst: *mut ComponentInst, idx: usize) -> &'static mut HookSlot {

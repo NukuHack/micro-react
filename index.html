@@ -9,6 +9,13 @@
 <body>
 <div id="root"></div>
 
+<script>
+if(sessionStorage.redirect){
+  history.replaceState(null,'',sessionStorage.redirect);
+  sessionStorage.removeItem('redirect');
+}
+</script>
+
 <script type="module">
 // used to be just : import MicroReact from './micro-react.js';
 import initWasm, * as MicroReact from './micro-react/pkg/micro_react.js';

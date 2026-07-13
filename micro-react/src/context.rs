@@ -74,7 +74,7 @@ impl<T: Clone + 'static> Context<T> {
 
 /// Read the current value of `ctx` and re-render this component when it changes.
 pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
-	use crate::hooks::{current_weak, use_effect_nodrop, DepVal};
+	use crate::hooks::{DepVal, current_weak, use_effect_nodrop};
 	use crate::scheduler::enqueue_render;
 
 	let value = ctx.current_value();

@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use js_sys::{Array, Object, Reflect, WeakMap};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{DomParser, Element, Node, SupportedType};
 
 use crate::bindings::{children_to_js, js_ref_to_node_ref, js_to_vnode, js_val_to_prop_val, props_to_js_object, vnode_to_js};
@@ -350,22 +350,20 @@ fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> Str
 	// `parse_event_prop` only recognizes a capture listener via a literal
 	// trailing "Capture" (exact case), so a suffix lost to lowercasing
 	// would silently downgrade to bubble phase — restore just that bit.
-	if let Some(rest) = lowered.strip_prefix("on") {
-		if !rest.is_empty() {
-			if let Some(evt) = rest.strip_suffix("capture") {
-				if !evt.is_empty() {
-					// Cosmetic only (the event name is lowercased again
-					// downstream regardless) but keeps the reconstructed
-					// name looking like a real prop, not "onclickCapture".
-					let mut chars = evt.chars();
-					let evt_capitalized = match chars.next() {
-						Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-						None => String::new(),
-					};
-					return format!("on{evt_capitalized}Capture");
-				}
-			}
-		}
+	if let Some(rest) = lowered.strip_prefix("on")
+		&& !rest.is_empty()
+		&& let Some(evt) = rest.strip_suffix("capture")
+		&& !evt.is_empty()
+	{
+		// Cosmetic only (the event name is lowercased again
+		// downstream regardless) but keeps the reconstructed
+		// name looking like a real prop, not "onclickCapture".
+		let mut chars = evt.chars();
+		let evt_capitalized = match chars.next() {
+			Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+			None => String::new(),
+		};
+		return format!("on{evt_capitalized}Capture");
 	}
 	lowered.to_string()
 }
@@ -502,12 +500,10 @@ fn split_holes(s: &str) -> TextTemplate {
 			}
 			tok.push(c2);
 		}
-		if closed {
-			if let Some(idx) = tok.strip_prefix('h').and_then(|d| d.parse::<usize>().ok()) {
-				literals.push(std::mem::take(&mut buf));
-				holes.push(idx);
-				continue;
-			}
+		if closed && let Some(idx) = tok.strip_prefix('h').and_then(|d| d.parse::<usize>().ok()) {
+			literals.push(std::mem::take(&mut buf));
+			holes.push(idx);
+			continue;
 		}
 		// Not a real hole token (shouldn't happen with well-formed input) —
 		// keep it verbatim instead of silently eating characters.
@@ -543,11 +539,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 					// indentation and should collapse, matching JSX. One
 					// with no newline is a deliberate same-line separator
 					// (`<span>a</span> <span>b</span>`) and must be kept.
-					if !text.is_empty() && !text.contains('\n') {
-						Some(ChildTemplate::StaticText(" ".to_string()))
-					} else {
-						None
-					}
+					if !text.is_empty() && !text.contains('\n') { Some(ChildTemplate::StaticText(" ".to_string())) } else { None }
 				} else {
 					Some(ChildTemplate::StaticText(text))
 				}
@@ -594,10 +586,10 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 			let mut children = Vec::new();
 			let child_nodes = node.child_nodes();
 			for i in 0..child_nodes.length() {
-				if let Some(c) = child_nodes.item(i) {
-					if let Some(ct) = compile_node(&c, case_map) {
-						children.push(ct);
-					}
+				if let Some(c) = child_nodes.item(i)
+					&& let Some(ct) = compile_node(&c, case_map)
+				{
+					children.push(ct);
 				}
 			}
 
@@ -691,10 +683,10 @@ fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
 	let mut roots = Vec::new();
 	let child_nodes = root.child_nodes();
 	for i in 0..child_nodes.length() {
-		if let Some(c) = child_nodes.item(i) {
-			if let Some(ct) = compile_node(&c, &case_map) {
-				roots.push(ct);
-			}
+		if let Some(c) = child_nodes.item(i)
+			&& let Some(ct) = compile_node(&c, &case_map)
+		{
+			roots.push(ct);
 		}
 	}
 	Ok(CompiledTemplate { roots })
@@ -798,10 +790,10 @@ fn render_child(ct: &ChildTemplate, values: &Array, out: &mut Vec<VNode>) {
 			// vnode: pass-through vnodes (incl. nested `html` calls),
 			// arrays → fragment, strings/numbers → text, null/bool → null.
 			let v = values.get(*i as u32);
-			if let Ok(vn) = js_to_vnode(&v) {
-				if !matches!(vn.inner, VNodeInner::Null) {
-					out.push(vn);
-				}
+			if let Ok(vn) = js_to_vnode(&v)
+				&& !matches!(vn.inner, VNodeInner::Null)
+			{
+				out.push(vn);
 			}
 		}
 		ChildTemplate::Element(elem_tpl) => {
@@ -821,14 +813,14 @@ fn build_static_attrs(builder: crate::vnode::ElementBuilder, tpl: &ElementTempla
 		// `dangerouslySetInnerHTML={{ __html }}` — diff::set_prop expects the
 		// flattened key "dangerouslySetInnerHTML.__html" as a plain string,
 		// so unwrap it here rather than passing an opaque `PropVal::Js`.
-		if a.name == "dangerouslySetInnerHTML" {
-			if let AttrValueTemplate::Hole(i) = &a.value {
-				let raw = values.get(*i as u32);
-				let html_val = Reflect::get(&raw, &"__html".into()).unwrap_or(JsValue::UNDEFINED);
-				if let Some(s) = html_val.as_string() {
-					builder = builder.attr("dangerouslySetInnerHTML.__html", s);
-					continue;
-				}
+		if a.name == "dangerouslySetInnerHTML"
+			&& let AttrValueTemplate::Hole(i) = &a.value
+		{
+			let raw = values.get(*i as u32);
+			let html_val = Reflect::get(&raw, &"__html".into()).unwrap_or(JsValue::UNDEFINED);
+			if let Some(s) = html_val.as_string() {
+				builder = builder.attr("dangerouslySetInnerHTML.__html", s);
+				continue;
 			}
 		}
 		builder = builder.attr(a.name.clone(), resolve_attr_value(&a.value, values));

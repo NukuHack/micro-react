@@ -1,0 +1,13 @@
+1 context usage)
+
+real react :
+const theme = useContext(ThemeCtx);
+
+now micro-react :
+const theme  = ThemeCtx.useContext();
+
+
+2 error boundry)
+
+duplicate "Throw Error" button
+when pressed it throws and goes to the "disabled" state, but on reset it doesn ot get enabled just a new one is added, stacking forever

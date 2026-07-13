@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_test::*;
 
 use micro_react::events::set_event_handler;

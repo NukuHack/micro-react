@@ -6,7 +6,7 @@ use std::{
 	cell::RefCell,
 	rc::{Rc, Weak},
 };
-use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::hooks::{ComponentInst, HookSlot};
 

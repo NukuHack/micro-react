@@ -51,10 +51,10 @@ impl Root {
 
 			// Append any nodes that aren't yet in the DOM
 			for child in &children {
-				if let Some(dom) = &child._dom {
-					if dom.parent_node().is_none() {
-						container_node.append_child(dom)?;
-					}
+				if let Some(dom) = &child._dom
+					&& dom.parent_node().is_none()
+				{
+					container_node.append_child(dom)?;
 				}
 			}
 
