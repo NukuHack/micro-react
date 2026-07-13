@@ -330,12 +330,6 @@ pub fn js_use_state(initial: JsValue) -> Array {
 	arr
 }
 
-/// Same as `js_use_state`, used internally by the ErrorBoundary factory
-/// below. Not exposed to JS directly — `useState` above covers that.
-fn js_use_state_f(initial: JsValue) -> Array {
-	js_use_state(initial)
-}
-
 /// `useReducer(reducer, initialState)` — returns `[state, dispatch]`.
 #[wasm_bindgen(js_name = useReducer)]
 pub fn js_use_reducer(reducer: &Function, initial: JsValue) -> Array {
@@ -562,7 +556,7 @@ fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {
 /// Usage: `createElement(ErrorBoundary, { fallback: err => <div>{err.message}</div> }, children)`
 #[wasm_bindgen(js_name = createErrorBoundary)]
 pub fn js_create_error_boundary() -> JsValue {
-	// Re-entrancy guard: js_use_state_f can trigger a synchronous re-render
+	// Re-entrancy guard: js_use_state can trigger a synchronous re-render
 	// that re-invokes this closure before the first call returns; skip
 	// re-entrant calls and return NULL.
 	let in_progress = Rc::new(RefCell::new(false));
@@ -589,7 +583,7 @@ pub fn js_create_error_boundary() -> JsValue {
 }
 
 fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
-	let arr = js_use_state_f(JsValue::NULL);
+	let arr = js_use_state(JsValue::NULL);
 	let error: JsValue = arr.get(0);
 	let set_error: JsValue = arr.get(1);
 

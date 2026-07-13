@@ -191,7 +191,17 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 
 	// Reuse or create DOM element
 	let dom: Element = match old_elem {
-		Some(e) if e.local_name() == tag => e,
+		Some(e) if e.local_name() == tag => {
+			// Same tag, so the physical node is kept — but a non-Element old
+			// vnode (e.g. a Component whose output happened to share this
+			// tag) still needs its instance torn down, or it survives as a zombie.
+			if let Some(old) = old_vnode
+				&& !matches!(old.inner, VNodeInner::Element { .. })
+			{
+				unmount_vnode(old, true);
+			}
+			e
+		}
 		_other => {
 			// Unmount old tree if replacing a different element
 			if let Some(old) = old_vnode {
