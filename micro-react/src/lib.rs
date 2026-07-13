@@ -15,8 +15,10 @@ pub mod diff;
 pub mod events;
 pub mod hooks;
 pub mod html_template;
+pub mod jsx;
 pub mod render;
 pub mod router;
+pub mod scan;
 pub mod scheduler;
 pub mod vnode;
 

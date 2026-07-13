@@ -11,6 +11,10 @@ crate-type = ["cdylib", "rlib"]
 wasm-bindgen        = "0.2"
 js-sys              = "0.3"
 console_error_panic_hook = "0.1"
+# Typed, structured errors for the jsx module's transpile_jsx entry point
+# (malformed JSX should surface as a real Result::Err, not a panic).
+# Single-purpose, no transitive deps beyond proc-macro plumbing, MIT/Apache-2.0.
+thiserror           = "1"
 
 [dependencies.web-sys]
 version = "0.3"

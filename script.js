@@ -19,6 +19,7 @@ function Nav() {
       <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
       <${Link} to="/" class="nav-link${path === '/' ? ' active' : ''}">🏠 Home</${Link}>
       <${Link} to="/about" class="nav-link${path === '/about' ? ' active' : ''}">📖 About</${Link}>
+      <${Link} to="/hello" class="nav-link${path === '/hello' ? ' active' : ''}">👋 Hello</${Link}>
     </nav>
   `;
 }
@@ -379,11 +380,9 @@ const __root = render(html<span class="str">\`&lt;\${<span class="fn">App</span>
   `;
 }
 
-// ─── SHELL  (inside Router, so Nav can use useLocation) ───
-function Shell({ themeIdx, setThemeIdx }) {
-  const { path } = useLocation();
-  const Page = path === '/about' ? AboutPage : HomePage;
-
+// ─── SHELL ───
+function Shell({ themeIdx, setThemeIdx, Page }) {
+  
   return html`
     <${Fragment}>
       <${Nav}></${Nav}>
@@ -403,8 +402,9 @@ function App() {
   const theme = themes[themeIdx];
 
   const routes = {
-    '/':      () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}"></${Shell}>`,
-    '/about': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}"></${Shell}>`,
+    '/':      () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${HomePage} ></${Shell}>`,
+    '/about': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${AboutPage} ></${Shell}>`,
+    '/hello': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${HelloPage} ></${Shell}>`,
   };
 
   return html`
@@ -412,6 +412,12 @@ function App() {
       <${Router} routes="${routes}"></${Router}>
     </${ThemeCtx.Provider}>
   `;
+}
+
+// ─── JSX LOADER DEMO  (fetch -> transpileJsx -> render) ───
+const { Hello } = await window.loadJsxModule('./hello.jsx');
+function HelloPage() {
+  return html`<div style='position:relative;top:1rem;left:1rem;z-index:999'><${Hello} name="micro-react"/></div>`;
 }
 
 const __root = render(html`<${App}></${App}>`, document.getElementById('root'));

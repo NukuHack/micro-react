@@ -11,6 +11,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{DomParser, Element, Node, SupportedType};
 
 use crate::bindings::{children_to_js, js_ref_to_node_ref, js_to_vnode, js_val_to_prop_val, props_to_js_object, vnode_to_js};
+use crate::scan::{scan_html_tag_end, scan_tag_name_end, skip_html_comment, skip_html_doctype};
 use crate::vnode::{ComponentFn, NodeRef, PropVal, Props, VNode, VNodeInner};
 
 // ─────────────────────────── sentinel tokens ───────────────────────────
@@ -72,25 +73,16 @@ fn expand_self_closing_tags(html: &str) -> String {
 
 		// Comments: copy verbatim through "-->" so nothing inside is
 		// mistaken for tag syntax.
-		if chars[i..].starts_with(&['<', '!', '-', '-']) {
-			let start = i;
-			i += 4;
-			while i < n && !chars[i..].starts_with(&['-', '-', '>']) {
-				i += 1;
-			}
-			i = (i + 3).min(n);
-			out.extend(&chars[start..i]);
+		if let Some(end) = skip_html_comment(&chars, i) {
+			out.extend(&chars[i..end]);
+			i = end;
 			continue;
 		}
 
 		// Doctype / other `<!...>` declarations: copy verbatim through '>'.
-		if i + 1 < n && chars[i + 1] == '!' {
-			let start = i;
-			while i < n && chars[i] != '>' {
-				i += 1;
-			}
-			i = (i + 1).min(n);
-			out.extend(&chars[start..i]);
+		if let Some(end) = skip_html_doctype(&chars, i) {
+			out.extend(&chars[i..end]);
+			i = end;
 			continue;
 		}
 
@@ -107,10 +99,7 @@ fn expand_self_closing_tags(html: &str) -> String {
 
 		// Opening tag: capture the tag name.
 		let name_start = i + 1;
-		let mut j = name_start;
-		while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':')) {
-			j += 1;
-		}
+		let j = scan_tag_name_end(&chars, name_start);
 		if j == name_start {
 			// Not actually a tag start (a bare '<' in text) — leave as-is.
 			out.push('<');
@@ -121,37 +110,13 @@ fn expand_self_closing_tags(html: &str) -> String {
 
 		// Scan to the matching '>', tracking quotes so a '/' or '>' inside
 		// an attribute value isn't mistaken for tag syntax.
-		let mut k = j;
-		let mut in_quote: Option<char> = None;
-		let mut self_close = false;
-		while k < n {
-			let ch = chars[k];
-			match in_quote {
-				Some(q) => {
-					if ch == q {
-						in_quote = None;
-					}
-					k += 1;
-				}
-				None => match ch {
-					'"' | '\'' => {
-						in_quote = Some(ch);
-						k += 1;
-					}
-					'>' => break,
-					'/' if chars.get(k + 1) == Some(&'>') => {
-						self_close = true;
-						k += 1; // now indexes '>'
-						break;
-					}
-					_ => k += 1,
-				},
-			}
-		}
-		let tag_end = if k < n { k + 1 } else { n };
+		let tag_end_scan = scan_html_tag_end(&chars, j);
+		let tag_end = tag_end_scan.end;
+		let self_close = tag_end_scan.self_closing;
+		let close_slash_idx = if self_close { tag_end - 1 } else { tag_end };
 
 		if self_close {
-			let tag_text: String = chars[i..k].iter().collect();
+			let tag_text: String = chars[i..close_slash_idx].iter().collect();
 			let tag_text = tag_text.trim_end_matches('/').trim_end();
 			out.push_str(tag_text);
 			out.push('>');
