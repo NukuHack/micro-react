@@ -212,13 +212,13 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 // ─── helper: get &hooks safely through raw ptr ───
 // SAFETY: WASM is single-threaded; inst is valid for the duration of a render.
 macro_rules! hooks_ref {
-	($inst:expr) => {
-		unsafe { &(&(*$inst).hooks) }
-	};
+    ($inst:expr) => {
+        unsafe { &(*$inst).hooks }
+    };
 }
 #[inline(always)]
 unsafe fn hooks_get_mut(inst: *mut ComponentInst, idx: usize) -> &'static mut HookSlot {
-	&mut (&mut (*inst).hooks)[idx]
+	unsafe { &mut (&mut (*inst).hooks)[idx] }
 }
 macro_rules! hook_idx {
 	($inst:expr) => {

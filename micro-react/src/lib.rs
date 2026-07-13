@@ -16,6 +16,7 @@ pub mod events;
 pub mod hooks;
 pub mod html_template;
 pub mod jsx;
+pub mod module_prep;
 pub mod render;
 pub mod router;
 pub mod scan;

@@ -44,25 +44,17 @@ window.render = MicroReact.render;
 // ─── JSX module loader ───
 // Every micro-react app gets this, since it's what lets a plain .jsx file
 // be fetched and run in the browser with no build step: fetch the source,
-// strip its `import` lines (bare `import` doesn't work inside a Function
-// body), hand the rest to the Rust transpiler, then execute the result as
-// a function body, passing in whatever the caller already resolved for
-// each import specifier.
-function extractImports(src) {
-  const importLine = /^\s*import\s+(?:\{([^}]*)\}|(\S+))\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm;
-  const specifiers = [];
-  const code = src.replace(importLine, (match, named, defaultName, from) => {
-    specifiers.push({ named: named ? named.split(',').map(s => s.trim()).filter(Boolean) : [], defaultName, from });
-    return '';
-  });
-  return { code, specifiers };
-}
-
+// hand it to the Rust/wasm `prepareModule` (strips `import` lines — bare
+// `import` doesn't work inside a Function body — and rewrites `export`
+// syntax, also invalid in a Function body, into plain assignments onto a
+// loader-provided `exports` object), then the Rust JSX transpiler, then
+// execute the result as a function body, passing in whatever the caller
+// already resolved for each import specifier.
 async function loadJsxModule(url, imports = {}) {
   const src = await (await fetch(url)).text();
-  const { code, specifiers } = extractImports(src);
+  const { code, specifiers } = MicroReact.prepareModule(src);
   const jsCode = MicroReact.transpileJsx(code);
-  const fn = new Function(...Object.keys(imports), jsCode + '\nreturn typeof exports !== "undefined" ? exports : undefined;');
+  const fn = new Function(...Object.keys(imports), 'const exports = {};\n' + jsCode + '\nreturn exports;');
   return fn(...Object.values(imports));
 }
 

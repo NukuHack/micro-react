@@ -1,7 +1,7 @@
 [package]
 name = "micro-react"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "MicroReact – a React-like UI runtime in Rust/WASM"
 
 [lib]
@@ -11,10 +11,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-bindgen        = "0.2"
 js-sys              = "0.3"
 console_error_panic_hook = "0.1"
-# Typed, structured errors for the jsx module's transpile_jsx entry point
-# (malformed JSX should surface as a real Result::Err, not a panic).
-# Single-purpose, no transitive deps beyond proc-macro plumbing, MIT/Apache-2.0.
-thiserror           = "1"
+thiserror           = "^2"
 
 [dependencies.web-sys]
 version = "0.3"
@@ -51,14 +48,8 @@ features = [
 wasm-bindgen-test = "0.3"
 
 [profile.release]
-# "z" optimizes purely for smallest binary size, at a real cost to
-# diffing/render performance. For a UI runtime whose whole job is fast
-# reconciliation, that trade leans the wrong way — "s" still keeps
-# size down (most size-inflating optimizations are still disabled)
-# while allowing the compiler to make speed-motivated choices "z" forbids.
-# If bundle size is the priority for your deployment, switch this back to
-# "z"; if raw speed matters more than any size difference, try `3` and
-# compare actual .wasm output size for your app before committing.
+# "z" is for size, "s" is mainly for size, but allows speed too
+# "3" is mainly for speed but good for size too
 opt-level   = "s"
 lto         = true
 codegen-units = 1

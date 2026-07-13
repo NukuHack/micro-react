@@ -297,7 +297,7 @@ function HomePage() {
       <div class="hero">
         <div>
           <div class="hero-pill" style="margin-bottom:.75rem"><span class="dot"></span>live demo</div>
-          <h1>micro-react v3</h1>
+          <h1>micro-react</h1>
           <h2>Pure JS · no build step · no dependencies</h2>
         </div>
       </div>
@@ -345,7 +345,7 @@ function AboutPage() {
       <h2>A 1-file React-compatible runtime for the browser</h2>
 
       <div class="card">
-        <p style="line-height:1.7;color:var(--muted);font-size:.9rem">micro-react v3 absorbs the most impactful internals from Preact's source while staying under one self-contained file with zero build requirements. Drop it next to an HTML page, import it as an ES module, and you have a full component model with hooks, context, portals, lazy loading, error boundaries, and a built-in SPA router.</p>
+        <p style="line-height:1.7;color:var(--muted);font-size:.9rem">micro-react absorbs the most impactful internals from Preact's source while staying under one self-contained file with zero build requirements. Drop it next to an HTML page, import it as an ES module, and you have a full component model with hooks, context, portals, lazy loading, error boundaries, and a built-in SPA router.</p>
       </div>
 
 <div class="code-block">
@@ -415,9 +415,12 @@ function App() {
 }
 
 // ─── JSX LOADER DEMO  (fetch -> transpileJsx -> render) ───
-const { Hello } = await window.loadJsxModule('./hello.jsx');
+const { default: Hello,  lol } = await window.loadJsxModule('./hello.jsx');
 function HelloPage() {
-  return html`<div style='position:relative;top:1rem;left:1rem;z-index:999'><${Hello} name="micro-react"/></div>`;
+  return html`<div style='position:relative;top:1rem;left:1rem;z-index:999'>
+    <${Hello} name="micro-react"/>
+    <${lol} name="Looool"/>
+  </div>`;
 }
 
 const __root = render(html`<${App}></${App}>`, document.getElementById('root'));
