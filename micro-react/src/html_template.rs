@@ -436,6 +436,27 @@ struct CompiledTemplate {
 
 // ───────────────────────── step 1: compiling ─────────────────────────
 
+/// Looks ahead from a tag-open hole at index `i` to determine whether that
+/// tag is self-closing (`<${Comp} ... />`), by scanning the remaining
+/// static text for the tag's terminating `>` or `/>`. Later holes (e.g.
+/// attribute values) can't contain the tag's own `/`/`>`/quote syntax since
+/// they're opaque runtime values, so it's safe to flatten the remaining
+/// statics together, using a placeholder character in place of each hole,
+/// and reuse the same quote-aware scan `expand_self_closing_tags` relies on.
+fn tag_hole_is_self_closing(statics: &[String], i: usize) -> bool {
+	let mut flat: Vec<char> = Vec::new();
+	for (offset, s) in statics[i + 1..].iter().enumerate() {
+		flat.extend(s.chars());
+		if i + 1 + offset + 1 < statics.len() {
+			// Placeholder for the hole between this static piece and the
+			// next; never a quote, slash, or angle bracket, so it can't be
+			// mistaken for tag syntax by the scan below.
+			flat.push('\u{FFFF}');
+		}
+	}
+	scan_html_tag_end(&flat, 0).self_closing
+}
+
 /// Builds the sentinel HTML string from just the static parts, tracking
 /// which hole positions are "tag position" holes (immediately after `<` or
 /// `</`) versus ordinary content/attribute holes.
@@ -466,7 +487,15 @@ fn build_sentinel_html(statics: &[String]) -> String {
 			html.push_str(&name);
 		} else if looks_like_open {
 			let name = tag_slot_name(i);
-			open_tag_stack.push(name.clone());
+			// A self-closing tag hole (`<${Comp} .../>`) never gets a
+			// matching `</${Comp}>` hole later on, so it must not be
+			// pushed onto the stack — otherwise a later, unrelated
+			// closing-tag hole (e.g. the enclosing element's) would pop
+			// this name instead of its own, mismatching the tags that
+			// `expand_self_closing_tags` and the DOM parser then see.
+			if !tag_hole_is_self_closing(statics, i) {
+				open_tag_stack.push(name.clone());
+			}
 			html.push_str(&name);
 		} else {
 			html.push_str(&hole_token(i));
@@ -937,6 +966,18 @@ mod pure_logic_tests {
 		let input = "<mr-slot-0 /><span>after</span>";
 		let expected = "<mr-slot-0></mr-slot-0><span>after</span>";
 		assert_eq!(expand_self_closing_tags(input), expected);
+	}
+
+	#[test]
+	fn self_closing_nested_component_hole_does_not_steal_parent_close_name() {
+		// Regression test: a self-closing component hole nested inside
+		// another component hole used to get pushed onto the tag-name
+		// stack and never popped, so the *enclosing* component's closing
+		// hole would incorrectly reuse the inner tag's synthetic name,
+		// mismatching the tags the DOM parser sees.
+		let statics: Vec<String> = vec!["<".into(), " key=".into(), "><".into(), " shouldExplode=".into(), " /></".into(), ">".into()];
+		let html = build_sentinel_html(&statics);
+		assert_eq!(html, "<mr-slot-0 key=\u{E000}h1\u{E000}><mr-slot-2 shouldExplode=\u{E000}h3\u{E000} /></mr-slot-0>");
 	}
 
 	#[test]
