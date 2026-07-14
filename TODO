@@ -4,7 +4,7 @@ duplicate "Throw Error" button
 when pressed it throws and goes to the "disabled" state, but on reset it doesn't get enabled just a new one is added, stacking forever
 
 in reality it adds new parts to the dom, not really duplicating, but it "unmounts" the old ones, so even useState does not work on them, this is the duplicated code :
-
+```js
 <div class="btn-row" style="margin-top:.75rem">
 <button
 class="btn-danger btn-sm"
@@ -14,6 +14,6 @@ disabled={explode}
 💣 Throw error
 </button>
 </div>
-
+```
 it is duplicated between the h3 and the BombComponent somewhere, the button is disabled, and does not respond to any change
 nothing else can make it dissapear other than full reload (page switch and back) 

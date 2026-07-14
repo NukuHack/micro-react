@@ -26,3 +26,4 @@ pkg
 # Deliberatly ignored file formats (not to bloat the git history)
 *.zip
 *.lock
+*.txt

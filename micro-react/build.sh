@@ -31,7 +31,7 @@ rustup target add wasm32-unknown-unknown
 if $RUN_TESTS; then
   echo "==> Running pure-logic tests (cargo test --lib)..."
   set +e
-  cargo test --lib
+  cargo test
   LIB_TEST_STATUS=$?
   set -e
   if [ "$LIB_TEST_STATUS" -ne 0 ]; then
