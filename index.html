@@ -19,19 +19,19 @@ if(sessionStorage.redirect){
 <script type="module">
 // used to be just : import MicroReact from './micro-react.js';
 import initWasm, * as MicroReact from './micro-react/pkg/micro_react.js';
+window.MicroReact = MicroReact;
 // Boot WASM (needed so the module is genuinely loaded/used)
 await initWasm();
 
 // Fragment / ErrorBoundary / html aren't plain wasm-bindgen exports,
 // so derive them here once, right after init.
-const Fragment = MicroReact.getFragment();
-const ErrorBoundary = MicroReact.createErrorBoundary();
-const html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
+window.Fragment = MicroReact.getFragment();
+window.ErrorBoundary = MicroReact.createErrorBoundary();
+window.html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
 
+window.loadJsxModule = MicroReact.loadJsxModule;
 // Make everything available globally
-window.Fragment = Fragment;
-window.html = html;
-window.ErrorBoundary = ErrorBoundary;
+// Object.assign(window, MicroReact);
 window.useState = MicroReact.useState;
 window.useReducer = MicroReact.useReducer;
 window.useEffect = MicroReact.useEffect;
@@ -41,45 +41,13 @@ window.useMemo = MicroReact.useMemo;
 window.useCallback = MicroReact.useCallback;
 window.useId = MicroReact.useId;
 window.createContext = MicroReact.createContext;
+window.useContext = MicroReact.useContext;
 window.memo = MicroReact.memo;
 window.Router = MicroReact.Router;
 window.Link = MicroReact.Link;
 window.useLocation = MicroReact.useLocation;
 window.useNavigate = MicroReact.useNavigate;
 window.render = MicroReact.render;
-
-// ─── JSX module loader ───
-// Every micro-react app gets this, since it's what lets a plain .jsx file
-// be fetched and run in the browser with no build step: fetch the source,
-// hand it to the Rust/wasm `prepareModule` (strips `import` lines — bare
-// `import` doesn't work inside a Function body — and rewrites `export`
-// syntax, also invalid in a Function body, into plain assignments onto a
-// loader-provided `exports` object), then the Rust JSX transpiler, then
-// execute the result as a function body, passing in whatever the caller
-// already resolved for each import specifier.
-async function loadJsxModule(url, imports = {}) {
-  const src = await (await fetch(url)).text();
-  const { code, specifiers } = MicroReact.prepareModule(src);
-  const jsCode = MicroReact.transpileJsx(code);
-  const fn = new Function(...Object.keys(imports), 'const exports = {};\n' + jsCode + '\nreturn exports;');
-  return fn(...Object.values(imports));
-}
-
-window.loadJsxModule = loadJsxModule;
-
-function useContext(input) {
-  if (!input?.useContext) {
-    throw new TypeError('useContext: input must have a useContext method');
-  }
-  try {
-    return input.useContext();
-  } catch (error) {
-    throw new Error(`useContext: failed to execute useContext on input object - ${error.message}`);
-  }
-}
-
-window.useContext = useContext;
-
 
 await import('./script.js');
 </script>

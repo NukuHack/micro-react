@@ -1,5 +1,7 @@
 use micro_react::jsx::{JsxError, transpile_jsx_str};
 
+// ─── Tests ───
+
 #[test]
 fn basic_div() {
 	let out = transpile_jsx_str("const el = <div>hi</div>;").expect("should transpile");
@@ -20,8 +22,6 @@ fn nested_elements() {
 
 #[test]
 fn self_closing_tag_is_left_self_closing() {
-	// Expansion to `<foo></foo>` is html_template's job at render time, not
-	// the transpiler's — self-closing syntax passes through untouched.
 	let out = transpile_jsx_str("<Foo />").expect("should transpile");
 	assert_eq!(out, "html`<${Foo} />`");
 }
@@ -58,8 +58,6 @@ fn hole_with_ternary() {
 
 #[test]
 fn hole_with_arrow_function_braces() {
-	// The trickiest brace-balancing case: an arrow function body with its
-	// own `{}` nested inside the outer JSX hole's `{}`.
 	let out = transpile_jsx_str("<button onclick={() => { doThing(); }}>go</button>").expect("should transpile");
 	assert_eq!(out, "html`<button onclick=${() => { doThing(); }}>go</button>`");
 }
@@ -116,12 +114,6 @@ fn unbalanced_hole_is_a_real_error() {
 	assert!(matches!(err, JsxError::UnbalancedHole(_)));
 }
 
-// ─── Regression tests: nested JSX inside a `{}` hole ───
-// Previously `{expr}` holes were copied verbatim, so any JSX *inside* the
-// expression (e.g. the classic `{items.map(x => <li>...</li>)}` pattern)
-// was left untranspiled and shipped to the JS engine as raw `<li>` text
-// sitting where an expression was expected -- "expected expression, got '<'".
-
 #[test]
 fn nested_jsx_inside_child_hole_is_transpiled() {
 	let out = transpile_jsx_str("<ul>{items.map(x => <li>{x}</li>)}</ul>").expect("should transpile");
@@ -136,8 +128,6 @@ fn nested_jsx_inside_attribute_hole_is_transpiled() {
 
 #[test]
 fn nested_jsx_with_own_attribute_holes_is_transpiled() {
-	// Mirrors the real-world `about.jsx` / `home.jsx` pattern: a `.map()`
-	// callback returning JSX whose own attributes contain further holes.
 	let src = r#"<div class="grid">{features.map(f => (<div key={f.title} class="item"><h4>{f.title}</h4><p>{f.desc}</p></div>))}</div>"#;
 	let out = transpile_jsx_str(src).expect("should transpile");
 	let expected =
@@ -160,8 +150,6 @@ fn deeply_nested_map_inside_map_is_transpiled() {
 
 #[test]
 fn hole_without_nested_jsx_is_unaffected_by_the_fix() {
-	// Guards against a regression where the recursive call might mangle
-	// ordinary expressions that merely contain a `<` comparison.
 	let out = transpile_jsx_str("<div>{a < b ? x : y}</div>").expect("should transpile");
 	assert_eq!(out, "html`<div>${a < b ? x : y}</div>`");
 }

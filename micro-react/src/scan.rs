@@ -36,7 +36,7 @@ pub(crate) fn skip_html_doctype(chars: &[char], i: usize) -> Option<usize> {
 
 /// Scans a tag name starting at `start` (right after `<` or `</`), returning
 /// the index one past the last name character.
-pub(crate) fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
+pub fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
 	let n = chars.len();
 	let mut j = start;
 	while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':')) {
@@ -97,7 +97,7 @@ pub(crate) fn scan_html_tag_end(chars: &[char], from: usize) -> TagEnd {
 /// `${...}` holes with arbitrary nested code (including more strings and
 /// braces); those are skipped via [`find_matching_brace`] rather than by
 /// naively scanning for the next backtick.
-pub(crate) fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
+pub fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
 	let quote = *chars.get(i)?;
 	if !matches!(quote, '\'' | '"' | '`') {
 		return None;
@@ -120,7 +120,7 @@ pub(crate) fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
 /// If `chars[i..]` starts a `//` or `/* */` JS comment, returns the index
 /// just past its end (end-of-line for `//`, past `*/` for block comments —
 /// or end-of-input if unterminated).
-pub(crate) fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
+pub fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
 	let n = chars.len();
 	if chars[i..].starts_with(&['/', '/']) {
 		let mut j = i + 2;
@@ -143,7 +143,7 @@ pub(crate) fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
 /// at a literal `{`), skipping over nested braces, JS strings/template
 /// literals, and comments so characters inside them can't corrupt the
 /// balance count. Returns `None` if the input ends before the brace closes.
-pub(crate) fn find_matching_brace(chars: &[char], open: usize) -> Option<usize> {
+pub fn find_matching_brace(chars: &[char], open: usize) -> Option<usize> {
 	debug_assert_eq!(chars.get(open), Some(&'{'));
 	let n = chars.len();
 	let mut depth = 0usize;
@@ -207,8 +207,7 @@ mod tests {
 
 	#[test]
 	fn find_matching_brace_skips_strings_and_comments() {
-		let src = r#"{ if (x) { doThing("}"); } // } trailing comment
-}"#;
+		let src = "{ if (x) { doThing(\"}\"); } // } trailing comment\n}";
 		let chars: Vec<char> = src.chars().collect();
 		let close = find_matching_brace(&chars, 0).expect("brace should match");
 		assert_eq!(chars[close], '}');

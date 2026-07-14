@@ -8,7 +8,10 @@
 //! preceded by `return`/`(`, which means a stray `<` in a JS comparison
 //! can rarely be misread as a tag start; see `looks_like_jsx_start`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 
 use crate::scan::{find_matching_brace, scan_tag_name_end, skip_js_comment, skip_js_string};
 
@@ -251,4 +254,172 @@ pub fn transpile_jsx_str(source: &str) -> Result<String, JsxError> {
 #[wasm_bindgen(js_name = transpileJsx)]
 pub fn transpile_jsx(source: &str) -> Result<JsValue, JsValue> {
 	transpile_jsx_str(source).map(|s| JsValue::from_str(&s)).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+thread_local! {
+	static MODULE_CACHE: RefCell<HashMap<String, JsxModuleRecord>> = RefCell::new(HashMap::new());
+}
+struct JsxModuleRecord {
+	exports: JsValue,
+	is_loading: bool,
+}
+
+/// Recursively loads, transpiles, and executes a JSX module in the browser.
+#[wasm_bindgen(js_name = loadJsxModule)]
+pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsValue, JsValue> {
+	let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
+
+	// 1. Resolve relative paths to absolute URLs
+	let absolute_url = if let Some(base) = base_url {
+		web_sys::Url::new_with_base(url, &base)?.href()
+	} else {
+		let current_href = window.location().href()?;
+		web_sys::Url::new_with_base(url, &current_href)?.href()
+	};
+
+	// 2. Handle caching & break circular dependency deadlocks
+	let cached_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&absolute_url).map(|rec| rec.exports.clone()));
+	if let Some(exports) = cached_exports {
+		return Ok(exports);
+	}
+
+	// Pre-allocate the exports object. Circular imports will get this exact reference instantly.
+	let exports = js_sys::Object::new();
+	MODULE_CACHE.with(|cache| {
+		cache.borrow_mut().insert(absolute_url.clone(), JsxModuleRecord { exports: exports.clone().into(), is_loading: true });
+	});
+
+	// 3. Fetch the raw JSX file
+	let resp_val = JsFuture::from(window.fetch_with_str(&absolute_url)).await?;
+	let resp: web_sys::Response = resp_val.dyn_into()?;
+	if !resp.ok() {
+		return Err(JsValue::from_str(&format!("Failed to fetch JSX from '{}': {} {}", absolute_url, resp.status(), resp.status_text())));
+	}
+	let src_val = JsFuture::from(resp.text()?).await?;
+	let src = src_val.as_string().unwrap_or_default();
+
+	// 4. Prepare module (Strips import/export and parses import lines using Rust)
+	let (code, specifiers) = crate::module_prep::prepare_module_str(&src);
+
+	// 5. Recursively resolve all dependencies in parallel
+	let promises = js_sys::Array::new();
+	for spec in specifiers {
+		let from = spec.from.clone();
+		let absolute_url_clone = absolute_url.clone();
+		let default_name = spec.default_name.clone();
+		let namespace_name = spec.namespace_name.clone();
+		let named = spec.named.clone();
+
+		let child_url = web_sys::Url::new_with_base(&from, &absolute_url_clone)?.href();
+
+		let is_circular = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).is_some_and(|rec| rec.is_loading));
+
+		if is_circular {
+			// Break the deadlock! Grab the pre-allocated reference without awaiting
+			let child_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).unwrap().exports.clone());
+			let result_obj = js_sys::Object::new();
+			js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
+			js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
+			js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
+
+			let js_named = js_sys::Array::new();
+			for (local, exported) in named {
+				let pair = js_sys::Array::new();
+				pair.push(&JsValue::from_str(&local));
+				pair.push(&JsValue::from_str(&exported));
+				js_named.push(&pair);
+			}
+			js_sys::Reflect::set(&result_obj, &"named".into(), &js_named)?;
+
+			promises.push(&js_sys::Promise::resolve(&result_obj));
+		} else {
+			// Spawn standard Rust async future to fetch the child module
+			let fut = async move {
+				let child_exports = load_jsx_module(&from, Some(absolute_url_clone)).await?;
+				let result_obj = js_sys::Object::new();
+				js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
+				js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
+				js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
+
+				let js_named = js_sys::Array::new();
+				for (local, exported) in named {
+					let pair = js_sys::Array::new();
+					pair.push(&JsValue::from_str(&local));
+					pair.push(&JsValue::from_str(&exported));
+					js_named.push(&pair);
+				}
+				js_sys::Reflect::set(&result_obj, &"named".into(), &js_named)?;
+				Ok(result_obj.into())
+			};
+			promises.push(&wasm_bindgen_futures::future_to_promise(fut));
+		}
+	}
+
+	// Await all parallel loads
+	let resolved_array_val = JsFuture::from(js_sys::Promise::all(&promises)).await?;
+	let resolved_array: js_sys::Array = resolved_array_val.dyn_into()?;
+
+	// Bind imports matching the shape
+	let imports = js_sys::Object::new();
+	for val in resolved_array.iter() {
+		let obj: js_sys::Object = val.dyn_into()?;
+		let child_exports = js_sys::Reflect::get(&obj, &"exports".into())?;
+		let default_name = js_sys::Reflect::get(&obj, &"default_name".into())?;
+		let namespace_name = js_sys::Reflect::get(&obj, &"namespace_name".into())?;
+		let named: js_sys::Array = js_sys::Reflect::get(&obj, &"named".into())?.dyn_into()?;
+
+		if !namespace_name.is_null() && !namespace_name.is_undefined() {
+			js_sys::Reflect::set(&imports, &namespace_name, &child_exports)?;
+		}
+
+		if !default_name.is_null() && !default_name.is_undefined() {
+			let default_val = js_sys::Reflect::get(&child_exports, &"default".into())?;
+			js_sys::Reflect::set(&imports, &default_name, &default_val)?;
+		}
+
+		for pair_val in named.iter() {
+			let pair: js_sys::Array = pair_val.dyn_into()?;
+			let local = pair.get(0);
+			let exported = pair.get(1);
+			let val = js_sys::Reflect::get(&child_exports, &exported)?;
+			js_sys::Reflect::set(&imports, &local, &val)?;
+		}
+	}
+
+	// 6. Transpile JSX syntax into html`...` calls
+	let js_code = crate::jsx::transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+	// 7. Map arguments and execute via the Function constructor
+	let param_names = js_sys::Object::keys(&imports);
+	let param_values = js_sys::Object::values(&imports);
+
+	let fn_body = format!("{}\nreturn exports;\n//# sourceURL={}", js_code, absolute_url);
+
+	let args = js_sys::Array::new();
+	args.push(&"exports".into());
+	for name in param_names.iter() {
+		args.push(&name);
+	}
+	args.push(&fn_body.into());
+
+	let function_constructor = js_sys::Reflect::get(&js_sys::global(), &"Function".into())?;
+	let func_constructor: js_sys::Function = function_constructor.dyn_into()?;
+	let func: js_sys::Function = js_sys::Reflect::construct(&func_constructor, &args)?.dyn_into()?;
+
+	let call_args = js_sys::Array::new();
+	call_args.push(&exports);
+	for val in param_values.iter() {
+		call_args.push(&val);
+	}
+
+	js_sys::Reflect::apply(&func, &JsValue::UNDEFINED, &call_args)?;
+
+	// Mark loading as complete in our cache
+	MODULE_CACHE.with(|cache| {
+		if let Some(rec) = cache.borrow_mut().get_mut(&absolute_url) {
+			rec.is_loading = false;
+		}
+	});
+
+	Ok(exports.into())
 }

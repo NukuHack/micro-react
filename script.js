@@ -58,10 +58,18 @@ function App() {
 }
 
 // ─── JSX LOADER DEMO  (fetch -> transpileJsx -> render) ───
-const { default: HelloPage } = await window.loadJsxModule('./hello.jsx');
-const { default: NotFound } = await window.loadJsxModule('./404.jsx');
-const { default: HomePage } = await window.loadJsxModule('./home.jsx');
-const { default: AboutPage } = await window.loadJsxModule('./about.jsx');
+
+const [
+  { default: HomePage },
+  { default: HelloPage },
+  { default: NotFound },
+  { default: AboutPage }
+] = await Promise.all([
+  window.loadJsxModule('./home.jsx'),
+  window.loadJsxModule('./hello.jsx'),
+  window.loadJsxModule('./404.jsx'),
+  window.loadJsxModule('./about.jsx')
+]);
 
 const __root = render(html`<${App} />`, document.getElementById('root'));
 window.__root = __root;

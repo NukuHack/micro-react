@@ -1,18 +1,14 @@
-//! Strips `import`/`export` syntax from a fetched `.jsx`/`.js` module body so
-//! the result is valid as a `new Function(...)` body (bare `import`/`export`
-//! are syntax errors there). Ports the two regex passes that used to live in
-//! `index.html` (`extractImports` / `rewriteExports`) into plain char
-//! scanning, so `loadJsxModule` only needs to fetch, call `prepareModule`,
-//! then `transpileJsx`, and build the `Function`.
-
 use wasm_bindgen::prelude::*;
 
 /// One `import ... from '...'` line found in the source, with its specifier
 /// shape preserved so a caller can resolve `from` against whatever modules
 /// it already has on hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportSpecifier {
-	pub named: Vec<String>,
+	// Holds pairs of: (local_alias, exported_name)
+	pub named: Vec<(String, String)>,
 	pub default_name: Option<String>,
+	pub namespace_name: Option<String>,
 	pub from: String,
 }
 
@@ -23,92 +19,109 @@ fn is_ident_char(c: char) -> bool {
 /// Matches a single `import {a, b} from '...'` or `import def from '...'`
 /// line in full (leading/trailing whitespace and an optional trailing `;`
 /// allowed, nothing else), returning its specifier if the whole line fits.
-fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
-	let chars: Vec<char> = line.chars().collect();
-	let n = chars.len();
-	let mut i = 0;
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if !chars[i..].starts_with(&['i', 'm', 'p', 'o', 'r', 't']) {
-		return None;
-	}
-	i += 6;
-	let before_ws = i;
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if i == before_ws {
+pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
+	let trimmed = line.trim();
+	if !trimmed.starts_with("import") {
 		return None;
 	}
 
-	let (named, default_name, mut i) = if chars.get(i) == Some(&'{') {
-		let close = chars[i..].iter().position(|&c| c == '}')? + i;
-		let inner: String = chars[i + 1..close].iter().collect();
-		let named: Vec<String> = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-		(named, None, close + 1)
-	} else {
-		let start = i;
-		while i < n && !chars[i].is_whitespace() {
-			i += 1;
-		}
-		if i == start {
+	// Ensure "import" is matched as a whole word
+	let rest = &trimmed[6..];
+	if !rest.starts_with(char::is_whitespace) {
+		return None;
+	}
+	let mut rest = rest.trim();
+
+	let mut default_name = None;
+	let mut namespace_name = None;
+	let mut named = Vec::new();
+
+	let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+
+	// 1. Parse default import if it exists
+	if !rest.starts_with('{') && !rest.starts_with('*') {
+		let ident_len = rest.chars().take_while(|&c| is_ident_char(c)).count();
+		if ident_len == 0 {
 			return None;
 		}
-		(Vec::new(), Some(chars[start..i].iter().collect::<String>()), i)
-	};
+		let ident = &rest[..ident_len];
+		default_name = Some(ident.to_string());
+		rest = rest[ident_len..].trim();
 
-	let before_ws = i;
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if i == before_ws || !chars[i..].starts_with(&['f', 'r', 'o', 'm']) {
-		return None;
-	}
-	i += 4;
-	let before_ws = i;
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if i == before_ws {
-		return None;
+		// Handle mixed imports comma separator (e.g., import Foo, { bar } ...)
+		if rest.starts_with(',') {
+			rest = rest[1..].trim();
+		}
 	}
 
-	let quote = *chars.get(i)?;
+	// 2. Parse namespace wildcard (* as ns) or named imports ({ a, b })
+	if rest.starts_with('*') {
+		rest = rest[1..].trim();
+		if !rest.starts_with("as") {
+			return None;
+		}
+		rest = &rest[2..];
+		if !rest.starts_with(char::is_whitespace) {
+			return None;
+		}
+		rest = rest.trim();
+		let ident_len = rest.chars().take_while(|&c| is_ident_char(c)).count();
+		if ident_len == 0 {
+			return None;
+		}
+		namespace_name = Some(rest[..ident_len].to_string());
+		rest = rest[ident_len..].trim();
+	} else if rest.starts_with('{') {
+		let close_idx = rest.find('}')?;
+		let inner = &rest[1..close_idx];
+		for part in inner.split(',') {
+			let p = part.trim();
+			if p.is_empty() {
+				continue;
+			}
+			let words: Vec<&str> = p.split_whitespace().collect();
+			if words.len() == 3 && words[1] == "as" {
+				named.push((words[2].to_string(), words[0].to_string()));
+			} else if let Some(&word) = words.first() {
+				named.push((word.to_string(), word.to_string()));
+			}
+		}
+		rest = rest[close_idx + 1..].trim();
+	}
+
+	// 3. Match "from" keyword
+	if !rest.starts_with("from") {
+		return None;
+	}
+	rest = &rest[4..];
+	if !rest.starts_with(char::is_whitespace) {
+		return None;
+	}
+	rest = rest.trim();
+
+	// 4. Parse module specifier string
+	if rest.is_empty() {
+		return None;
+	}
+	let quote = rest.chars().next()?;
 	if quote != '\'' && quote != '"' {
 		return None;
 	}
-	i += 1;
-	let start = i;
-	while i < n && chars[i] != quote {
-		i += 1;
-	}
-	if i >= n || i == start {
-		return None;
-	}
-	let from: String = chars[start..i].iter().collect();
-	i += 1;
+	let rest = &rest[1..];
+	let close_quote_idx = rest.find(quote)?;
+	let from = rest[..close_quote_idx].to_string();
+	let trailing = rest[close_quote_idx + 1..].trim();
+	let trailing = trailing.strip_prefix(';').unwrap_or(trailing).trim();
 
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if chars.get(i) == Some(&';') {
-		i += 1;
-	}
-	while i < n && chars[i].is_whitespace() {
-		i += 1;
-	}
-	if i != n {
+	// 5. Ensure there is nothing trailing except an optional semicolon
+	if !trailing.is_empty() {
 		return None;
 	}
 
-	Some(ImportSpecifier { named, default_name, from })
+	Some(ImportSpecifier { named, default_name, namespace_name, from })
 }
 
-/// Removes every whole-line `import ... from '...'` statement, blanking the
-/// line in place (matching the JS version's line-anchored regex replace),
-/// and collects what each one specified.
-fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
+pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let mut specifiers = Vec::new();
 	let lines: Vec<String> = source
 		.split('\n')
@@ -123,11 +136,7 @@ fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 	(lines.join("\n"), specifiers)
 }
 
-/// Handles `export default function Name(...)` (keeps the declaration so it
-/// can still reference itself by name, deferring the `exports.default`
-/// assignment) and `export default <expr>` (rewritten inline). Only the
-/// first occurrence is touched, matching the original non-global regexes.
-fn rewrite_default_export(source: &str) -> (String, Option<String>) {
+pub fn rewrite_default_export(source: &str) -> (String, Option<String>) {
 	let chars: Vec<char> = source.chars().collect();
 	let n = chars.len();
 	let mut i = 0;
@@ -178,11 +187,7 @@ fn rewrite_default_export(source: &str) -> (String, Option<String>) {
 	(source.to_string(), None)
 }
 
-/// Splits `local as alias` on a bare `as` keyword with at least one
-/// whitespace character on each side (matching `/\s+as\s+/`, not a literal
-/// single space, so tab-indented or double-spaced source still matches and
-/// identifiers merely containing "as" — e.g. `gas`, `aslong` — don't).
-fn split_as(part: &str) -> Option<(&str, &str)> {
+pub fn split_as(part: &str) -> Option<(&str, &str)> {
 	let bytes = part.as_bytes();
 	let mut search_from = 0;
 	while let Some(rel) = part[search_from..].find("as") {
@@ -197,9 +202,7 @@ fn split_as(part: &str) -> Option<(&str, &str)> {
 	None
 }
 
-/// Rewrites every `export { a, b as c };` re-export line into assignments
-/// onto `exports`, recording each so they can be appended after the code.
-fn rewrite_named_reexports(source: &str, exported: &mut Vec<String>) -> String {
+pub fn rewrite_named_reexports(source: &str, exported: &mut Vec<String>) -> String {
 	source
 		.split('\n')
 		.map(|line| {
@@ -232,12 +235,7 @@ fn rewrite_named_reexports(source: &str, exported: &mut Vec<String>) -> String {
 		.join("\n")
 }
 
-/// Strips the `export` keyword from `export const|let|var|function|class
-/// Name ...` declarations (every line, unlike the two passes above), keeping
-/// the rest of the line untouched and recording each declared name. Accepts
-/// any run of whitespace after `export` (tabs, multiple spaces), not just a
-/// single literal space, matching the original `/\s+/` regex.
-fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> String {
+pub fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> String {
 	const KINDS: [&str; 5] = ["const", "let", "var", "function", "class"];
 	source
 		.split('\n')
@@ -271,7 +269,6 @@ fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> Stri
 		.join("\n")
 }
 
-/// Core rewrite, kept as plain Rust so it's directly unit-testable.
 pub fn rewrite_exports_str(source: &str) -> String {
 	let mut exported = Vec::new();
 	let (code, default_name) = rewrite_default_export(source);
@@ -288,30 +285,33 @@ pub fn rewrite_exports_str(source: &str) -> String {
 	code
 }
 
-/// Runs both passes: strip `import` lines (collecting their specifiers),
-/// then rewrite `export` syntax on what's left.
 pub fn prepare_module_str(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let (code, specifiers) = extract_imports(source);
 	(rewrite_exports_str(&code), specifiers)
 }
 
-/// Builds the `{ named: string[], defaultName: string|null, from: string }`
-/// object matching the shape `index.html`'s `extractImports` used to return.
 fn specifier_to_js(spec: &ImportSpecifier) -> Result<JsValue, JsValue> {
 	let obj = js_sys::Object::new();
+
 	let named = js_sys::Array::new();
-	for name in &spec.named {
-		named.push(&JsValue::from_str(name));
+	for (local, exported) in &spec.named {
+		let pair = js_sys::Array::new();
+		pair.push(&JsValue::from_str(local));
+		pair.push(&JsValue::from_str(exported));
+		named.push(&pair);
 	}
 	js_sys::Reflect::set(&obj, &"named".into(), &named)?;
+
 	let default_name = spec.default_name.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
 	js_sys::Reflect::set(&obj, &"defaultName".into(), &default_name)?;
+
+	let namespace_name = spec.namespace_name.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
+	js_sys::Reflect::set(&obj, &"namespaceName".into(), &namespace_name)?;
+
 	js_sys::Reflect::set(&obj, &"from".into(), &JsValue::from_str(&spec.from))?;
 	Ok(obj.into())
 }
 
-/// `{ code, specifiers }` for a fetched module body, ready to be passed
-/// through `transpileJsx` and then into `new Function(...)`.
 #[wasm_bindgen(js_name = prepareModule)]
 pub fn prepare_module(source: &str) -> Result<JsValue, JsValue> {
 	let (code, specifiers) = prepare_module_str(source);

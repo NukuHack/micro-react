@@ -1,6 +1,6 @@
 //! wasm-bindgen public surface — the JS-callable exports.
 
-use js_sys::{Array, Function, Object, Reflect};
+use js_sys::{Array, Error, Function, Object, Reflect, TypeError};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, prelude::*};
@@ -480,6 +480,36 @@ pub fn js_create_context(default_value: JsValue) -> Result<JsValue, JsValue> {
 	use_ctx_fn.forget();
 
 	Ok(obj.into())
+}
+
+#[wasm_bindgen(js_name = useContext)]
+pub fn js_use_context(input: &JsValue) -> Result<JsValue, JsValue> {
+	// 1. Replicate the `input?.useContext` check
+	if input.is_null() || input.is_undefined() {
+		return Err(TypeError::new("useContext: input must have a useContext method").into());
+	}
+
+	let use_context_prop = Reflect::get(input, &JsValue::from_str("useContext"))?;
+	if !use_context_prop.is_function() {
+		return Err(TypeError::new("useContext: input must have a useContext method").into());
+	}
+
+	let func: Function = use_context_prop.unchecked_into();
+
+	// 2. Replicate the `try { ... } catch (error)` block
+	match func.call0(input) {
+		Ok(val) => Ok(val),
+		Err(err) => {
+			// Attempt to extract the error message string from the caught JS error
+			let err_message = err
+				.as_string()
+				.or_else(|| Reflect::get(&err, &JsValue::from_str("message")).ok().and_then(|m| m.as_string()))
+				.unwrap_or_else(|| "Unknown error".to_string());
+
+			// Throw the wrapped Error back to JavaScript
+			Err(Error::new(&format!("useContext: failed to execute useContext on input object - {}", err_message)).into())
+		}
+	}
 }
 
 // ─── memo() HOC ───

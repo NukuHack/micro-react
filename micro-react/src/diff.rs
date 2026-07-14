@@ -574,6 +574,19 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 
 // ─── diff_children — Preact skew algorithm ───
 
+/// Walks into Fragment/Component subtrees to find the last real DOM node a
+/// vnode occupies. `_dom` on a Fragment/Component only ever holds its
+/// *first* node, which isn't enough to anchor the sibling that follows a
+/// multi-node child — see the call site in `diff_children`.
+fn last_dom_of(vnode: &VNode) -> Option<Node> {
+	match &vnode.inner {
+		VNodeInner::Fragment { children, .. } => children.0.iter().rev().find_map(last_dom_of),
+		VNodeInner::Component { inst, .. } => inst.0.borrow().as_ref().and_then(|i| i.borrow().last_vnode.as_ref().and_then(last_dom_of)),
+		VNodeInner::Portal { .. } | VNodeInner::Null => None,
+		VNodeInner::Element { .. } | VNodeInner::Text(_) => vnode._dom.clone(),
+	}
+}
+
 pub fn diff_children(
 	parent_dom: &Node,
 	new_children: &mut [VNode],
@@ -647,8 +660,8 @@ pub fn diff_children(
 		if should_insert && let Some(dom) = &cv._dom {
 			parent_dom.insert_before(dom, old_dom.as_ref())?;
 		}
-		if let Some(dom) = &cv._dom {
-			old_dom = dom.next_sibling();
+		if let Some(last) = last_dom_of(cv) {
+			old_dom = last.next_sibling();
 		}
 
 		cv._flags &= !(FLAG_INSERT | FLAG_MATCHED);
