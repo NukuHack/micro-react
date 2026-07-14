@@ -67,6 +67,20 @@ async function loadJsxModule(url, imports = {}) {
 
 window.loadJsxModule = loadJsxModule;
 
+function useContext(input) {
+  if (!input?.useContext) {
+    throw new TypeError('useContext: input must have a useContext method');
+  }
+  try {
+    return input.useContext();
+  } catch (error) {
+    throw new Error(`useContext: failed to execute useContext on input object - ${error.message}`);
+  }
+}
+
+window.useContext = useContext;
+
+
 await import('./script.js');
 </script>
 </body>

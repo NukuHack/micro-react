@@ -147,7 +147,7 @@ function TimerCard() {
 
 // ─── THEME DEMO (useContext) ───
 function ThemeCard({ThemeCtx}) {
-  const theme = ThemeCtx.useContext();
+  const theme = useContext(ThemeCtx);
 
   return (
     <div class="card">
@@ -283,7 +283,7 @@ const tabContent = {
   Events:  () => <p>🧲 Event delegation via logical-clock proxy. Prevents "click mounts node that immediately receives same click" race (ported from Preact).</p>,
   Hooks:   () => <p>🪝 Full hook surface: useState, useReducer, useEffect, useLayoutEffect, useMemo, useCallback, useRef, useId, useTransition, useDeferredValue, useSyncExternalStore, useImperativeHandle.</p>,
   Router:  () => <p>🛣️ Built-in SPA router with pattern matching, Link component, and hooks: useLocation, useNavigate, useParams, useSearchParams. URL and DOM stay in sync.</p>,
-  Context: () => <p>🧩 createContext with Provider / Consumer / ctx.useContext(). Subscribers re-render on value changes without prop-drilling.</p>,
+  Context: () => <p>🧩 createContext with Provider / Consumer / useContext(ctx). Subscribers re-render on value changes without prop-drilling.</p>,
 };
 
 function TabsCard() {
