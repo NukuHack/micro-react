@@ -47,11 +47,18 @@ pub fn set_event_handler(elem: &web_sys::Element, event_name: &str, capture: boo
 			if old_handler.is_some() {
 				let proxy_key = format!("__proxy_{}", key);
 				if let Ok(proxy_val) = Reflect::get(listeners.as_ref(), &JsValue::from_str(&proxy_key)) {
-					if !proxy_val.is_null()
-						&& !proxy_val.is_undefined()
-						&& let Ok(proxy_fn) = proxy_val.dyn_into::<Function>()
-					{
-						let _ = elem.remove_event_listener_with_callback_and_bool(event_name, &proxy_fn, capture);
+					if !proxy_val.is_null() && !proxy_val.is_undefined() {
+						match proxy_val.dyn_into::<Function>() {
+							Ok(proxy_fn) => {
+								let _ = elem.remove_event_listener_with_callback_and_bool(event_name, &proxy_fn, capture);
+							}
+							Err(_) => {
+								crate::console_warn!(
+									"[micro-react] stored proxy for \"{}\" was not a function (possibly overwritten by other code); skipping removal",
+									key
+								);
+							}
+						}
 					}
 					let _ = Reflect::delete_property(&listeners, &JsValue::from_str(&proxy_key));
 				}
@@ -64,7 +71,10 @@ pub fn set_event_handler(elem: &web_sys::Element, event_name: &str, capture: boo
 
 fn ensure_listeners(elem: &JsValue) -> js_sys::Object {
 	match Reflect::get(elem, &JsValue::from_str(LISTENERS_KEY)) {
-		Ok(v) if !v.is_undefined() && !v.is_null() => v.dyn_into::<js_sys::Object>().unwrap_or_else(|_| js_sys::Object::new()),
+		Ok(v) if !v.is_undefined() && !v.is_null() => v.dyn_into::<js_sys::Object>().unwrap_or_else(|_| {
+			crate::console_warn!("[micro-react] {} on element was not an object (possibly overwritten by other code); replacing it", LISTENERS_KEY);
+			js_sys::Object::new()
+		}),
 		_ => {
 			let obj = js_sys::Object::new();
 			let _ = Reflect::set(elem, &JsValue::from_str(LISTENERS_KEY), obj.as_ref());
@@ -118,6 +128,10 @@ pub fn parse_event_prop(prop: &str) -> Option<(String, bool)> {
 	}
 
 	// Convert camelCase to lowercase: "MouseEnter" → "mouseenter"
-	let event_name = rest.to_lowercase();
+	// "DoubleClick" is special-cased to "dblclick" to match the real DOM event name.
+	let event_name = match rest {
+		"DoubleClick" => "dblclick".to_string(),
+		_ => rest.to_lowercase(),
+	};
 	Some((event_name, capture))
 }

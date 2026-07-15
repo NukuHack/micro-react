@@ -8,7 +8,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::bindings::{js_to_vnode, vnode_to_js};
 use crate::context::Context;
-use crate::hooks::{use_effect_nodrop, use_state};
+use crate::hooks::{use_effect_nodrop, use_memo, use_state};
 use crate::vnode::{VNode, VNodeInner};
 
 // ─── Pattern matching ───
@@ -83,7 +83,10 @@ thread_local! {
 }
 
 fn current_location() -> (String, String) {
-	let window = web_sys::window().expect("no window");
+	let Some(window) = web_sys::window() else {
+		crate::console_warn!("[micro-react] Router: no window available, defaulting location to \"/\"");
+		return ("/".to_string(), String::new());
+	};
 	let path = window.location().pathname().unwrap_or_else(|_| "/".to_string());
 	let search = window.location().search().unwrap_or_default();
 	(path, search)
@@ -111,7 +114,10 @@ pub fn js_router(props: JsValue) -> JsValue {
 					set_path(p);
 					set_search(s);
 				}) as Box<dyn Fn(web_sys::Event)>);
-				let window = web_sys::window().expect("no window");
+				let Some(window) = web_sys::window() else {
+					crate::console_warn!("[micro-react] Router: no window available, skipping popstate listener");
+					return;
+				};
 				let _ = window.add_event_listener_with_callback("popstate", closure.as_ref().unchecked_ref());
 				closure.forget();
 			},
@@ -181,8 +187,14 @@ pub fn js_link(props: JsValue) -> JsValue {
 			return;
 		}
 		e.prevent_default();
-		let window = web_sys::window().expect("no window");
-		let history = window.history().expect("no history");
+		let Some(window) = web_sys::window() else {
+			crate::console_warn!("[micro-react] Link: no window available, navigation ignored");
+			return;
+		};
+		let Ok(history) = window.history() else {
+			crate::console_warn!("[micro-react] Link: no history available, navigation ignored");
+			return;
+		};
 		let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to_for_click));
 		window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
 	}) as Box<dyn Fn(web_sys::MouseEvent)>);
@@ -210,13 +222,26 @@ pub fn js_use_location() -> JsValue {
 }
 
 /// `useNavigate()` — returns a `navigate(to)` function.
+/// Memoized with empty deps so the underlying `Closure` is created once per
+/// component instance instead of leaking a new one on every render.
 #[wasm_bindgen(js_name = useNavigate)]
 pub fn js_use_navigate() -> JsValue {
-	let navigate = Closure::wrap(Box::new(move |to: String| {
-		let window = web_sys::window().expect("no window");
-		let history = window.history().expect("no history");
-		let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to));
-		window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
-	}) as Box<dyn Fn(String)>);
-	navigate.into_js_value()
+	use_memo(
+		|| {
+			let navigate = Closure::wrap(Box::new(move |to: String| {
+				let Some(window) = web_sys::window() else {
+					crate::console_warn!("[micro-react] useNavigate: no window available, navigation ignored");
+					return;
+				};
+				let Ok(history) = window.history() else {
+					crate::console_warn!("[micro-react] useNavigate: no history available, navigation ignored");
+					return;
+				};
+				let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to));
+				window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
+			}) as Box<dyn Fn(String)>);
+			navigate.into_js_value()
+		},
+		Some(Vec::new()),
+	)
 }

@@ -19,7 +19,7 @@ fn simple_click() {
 #[wasm_bindgen_test]
 fn multi_word_event_name() {
 	assert_eq!(parse_event_prop("onMouseEnter"), Some(("mouseenter".to_string(), false)));
-	assert_eq!(parse_event_prop("onDoubleClick"), Some(("doubleclick".to_string(), false)));
+	assert_eq!(parse_event_prop("onDoubleClick"), Some(("dblclick".to_string(), false)));
 }
 
 #[wasm_bindgen_test]

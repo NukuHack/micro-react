@@ -17,11 +17,9 @@ if(sessionStorage.redirect){
 </script>
 
 <script type="module">
-// used to be just : import MicroReact from './micro-react.js';
-import initWasm, * as MicroReact from './micro-react/pkg/micro_react.js';
-window.MicroReact = MicroReact;
 // Boot WASM (needed so the module is genuinely loaded/used)
-await initWasm();
+window.MicroReact = await import('./micro-react/pkg/micro_react.js')
+  .then(async (m) => { await m.default(); return m; });
 
 // Fragment / ErrorBoundary / html aren't plain wasm-bindgen exports,
 // so derive them here once, right after init.
