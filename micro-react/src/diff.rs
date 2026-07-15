@@ -797,7 +797,14 @@ const BOOL_ATTRS: &[&str] = &[
 const SAFE_URL_PREFIXES: &[&str] = &["https://", "http://", "mailto:", "tel:", "#", "/", "./", "../"];
 
 fn is_safe_url(val: &str) -> bool {
-	let trimmed = val.trim();
+	// Browsers strip ASCII tab/newline/carriage-return from URLs before
+	// interpreting the scheme (per the WHATWG URL spec), so a payload like
+	// "jav\tascript:alert(1)" must be treated the same way here, or it can
+	// slip past scheme detection while still executing as "javascript:" in
+	// a real browser. Strip those control characters *before* trimming and
+	// scanning for a scheme, exactly as browsers do.
+	let stripped: String = val.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+	let trimmed = stripped.trim();
 	if trimmed.is_empty() {
 		return true;
 	}
@@ -1126,6 +1133,26 @@ mod helper_tests {
 		// "unrecognized" and falls through to unsafe acceptance.
 		assert!(is_safe_url("  https://example.com"));
 		assert!(!is_safe_url("  javascript:alert(1)"));
+	}
+
+	#[test]
+	fn is_safe_url_rejects_embedded_control_character_smuggling() {
+		// Real browsers strip ASCII tab/newline/CR from a URL before parsing
+		// its scheme (WHATWG URL spec), so these must be rejected the same
+		// way a bare "javascript:..." would be, even though the tab/newline
+		// breaks naive scheme-prefix scanning.
+		assert!(!is_safe_url("jav\tascript:alert(1)"));
+		assert!(!is_safe_url("java\nscript:alert(1)"));
+		assert!(!is_safe_url("java\r\nscript:alert(1)"));
+		assert!(!is_safe_url("\tjavascript:alert(1)"));
+		assert!(!is_safe_url("javascript\t:alert(1)"));
+		assert!(!is_safe_url("j\ta\tv\ta\ts\tc\tr\ti\tp\tt\t:alert(1)"));
+		// data: URLs with embedded control characters should also still be
+		// rejected once the control chars are stripped.
+		assert!(!is_safe_url("da\tta:text/html,<script>alert(1)</script>"));
+		// Legitimate safe schemes should still work if a stray control
+		// character sneaks in (defensive; browsers strip these too).
+		assert!(is_safe_url("ht\ttps://example.com"));
 	}
 
 	#[test]

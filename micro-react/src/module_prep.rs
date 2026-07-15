@@ -38,6 +38,26 @@ pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 
 	let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
 
+	// TS type-only imports (`import type { Foo } from '...'` / `import
+	// type Foo from '...'`) carry no runtime binding at all. Without this
+	// check, "type" would fall through to the default-import branch below
+	// and get silently (and wrongly) extracted as `default_name: "type"`.
+	// Real TS distinguishes this from a default import that happens to be
+	// named `type` (`import type from '...'`, legal since `type` isn't a
+	// reserved word) by checking whether the *next* token is `from` — if
+	// so, `type` is the binding itself, not the type-only modifier.
+	if let Some(after_type) = rest.strip_prefix("type")
+		&& after_type.starts_with(char::is_whitespace)
+	{
+		let after_type = after_type.trim_start();
+		if !after_type.starts_with("from") || after_type[4..].starts_with(is_ident_char) {
+			// Genuine `import type ...`: not a value-level import this
+			// parser (or the runtime module loader) should act on. Bail
+			// out and leave the line untouched rather than guessing.
+			return None;
+		}
+	}
+
 	// 1. Parse default import if it exists
 	if !rest.starts_with('{') && !rest.starts_with('*') {
 		let ident_len = rest.chars().take_while(|&c| is_ident_char(c)).count();

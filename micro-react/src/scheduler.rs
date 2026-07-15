@@ -92,9 +92,62 @@ fn schedule_flush() {
 	let _ = fn_.call1(&JsValue::NULL, &cb);
 }
 
+/// Same as `schedule_flush`, but yields to the browser's macrotask queue
+/// (`setTimeout(0)`) instead of a microtask. Used only when
+/// `flush_rerenders` bails out of a runaway loop: re-queuing via
+/// `queueMicrotask` wouldn't actually give control back to the browser,
+/// since microtasks scheduled from within microtask processing still run
+/// before the next paint/event — a `setState`-storming component would
+/// keep re-triggering flushes forever with the page never becoming
+/// responsive. `setTimeout` breaks that chain.
+fn schedule_flush_deferred() {
+	FLUSH_PENDING.with(|f| *f.borrow_mut() = true);
+
+	let cb = FLUSH_CB.with(|slot| {
+		let mut slot = slot.borrow_mut();
+		if slot.is_none() {
+			let closure = Closure::wrap(Box::new(|| {
+				FLUSH_PENDING.with(|f| *f.borrow_mut() = false);
+				flush_rerenders();
+			}) as Box<dyn Fn()>);
+			*slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
+		}
+		slot.as_ref().expect("slot was just set above").clone()
+	});
+
+	let fn_ = js_sys::Function::new_no_args("setTimeout(arguments[0], 0)");
+	let _ = fn_.call1(&JsValue::NULL, &cb);
+}
+
+/// Hard cap on how many components a single `flush_rerenders` call will
+/// render before bailing out. Exists to stop a component that dirties
+/// itself unconditionally (e.g. calling its own setState every render, or
+/// from a layout effect that always fires) from spinning the drain loop
+/// forever and hanging the page. `pub` so tests can assert the exact
+/// bailout point.
+pub const MAX_FLUSH_ITERATIONS: u32 = 1000;
+
 pub fn flush_rerenders() {
+	let mut iterations: u32 = 0;
 	// Drain the dirty queue, depth-sorted (parents before children).
 	loop {
+		iterations += 1;
+		if iterations > MAX_FLUSH_ITERATIONS {
+			crate::console_warn!(
+				"[micro-react] flush_rerenders bailed out after {} renders in a single flush. \
+				 This usually means a component is unconditionally re-dirtying itself (e.g. calling \
+				 its own setState every render, or from an effect with no guard/dependency check). \
+				 Remaining pending updates were deferred instead of spinning forever — check your \
+				 components for setState calls that aren't gated by a condition or a dependency array.",
+				MAX_FLUSH_ITERATIONS
+			);
+			// Defer the rest to a fresh macrotask rather than looping
+			// forever or immediately re-queuing a microtask (which
+			// wouldn't yield control back to the browser at all).
+			schedule_flush_deferred();
+			return;
+		}
+
 		let rc = DIRTY_QUEUE.with(|q| {
 			let mut q = q.borrow_mut();
 			// Drop any entries whose component has since unmounted before

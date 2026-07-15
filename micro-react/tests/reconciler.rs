@@ -38,6 +38,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 use micro_react::render::Root;
@@ -406,4 +407,221 @@ fn rerender_without_dep_change_does_not_rerun_effect() {
 
 	root.render(make()).unwrap();
 	assert_eq!(*run_count.borrow(), 1, "effect with unchanged empty deps must not re-run");
+}
+
+// ─── Adversarial reconciliation ───
+//
+// Previously untested per task.md: "no stress tests for large list
+// reversal, duplicate keys, or interleaved key reuse across mount/unmount".
+// `find_match` (src/diff.rs) is a faithful port of Preact's bidirectional
+// search, so these don't probe for crashes so much as pin down the
+// (reasonable, Preact-compatible) behavior for each case: first-unmatched
+// key wins on duplicates, same-key-different-type never reuses a DOM node,
+// and a key is scoped to a single diff — reusing it after the old node was
+// fully unmounted must not resurrect stale DOM.
+
+#[wasm_bindgen_test]
+fn duplicate_keys_do_not_panic_first_occurrence_wins_second_is_unmounted() {
+	// Two old children share the key "a" — not something the API forbids,
+	// just something a bad key function can produce. Diffing must not
+	// panic, and exactly one of them should be reused/updated (the first
+	// unmatched one `find_match` encounters) while the other is torn down
+	// as leftover, not silently duplicated or double-freed.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	root.render(VNode::fragment(vec![li("a", "A1"), li("a", "A2"), li("b", "Banana")])).unwrap();
+	assert_eq!(collect_li_texts(&container), vec!["A1", "A2", "Banana"]);
+	let first_a_node = container.children().item(0).unwrap();
+
+	root.render(VNode::fragment(vec![li("a", "A-updated"), li("b", "Banana")])).unwrap();
+
+	assert_eq!(collect_li_texts(&container), vec!["A-updated", "Banana"], "should end up with exactly one 'a' and one 'b', no duplication/crash");
+	assert!(
+		container.children().item(0).unwrap().is_same_node(Some(&first_a_node)),
+		"the first duplicate-keyed node should be the one reused/updated"
+	);
+}
+
+#[wasm_bindgen_test]
+fn large_keyed_list_full_reversal_relocates_every_node_without_recreation() {
+	// A full reversal of a longer list is exactly the case that degrades
+	// find_match to its quadratic worst case (task.md #1) — this doesn't
+	// assert on performance, but it does pin down correctness under that
+	// worst case: every node should be *moved*, not torn down and rebuilt.
+	const N: usize = 40;
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	let forward: Vec<VNode> = (0..N).map(|i| li(&format!("k{i}"), &format!("item{i}"))).collect();
+	root.render(VNode::fragment(forward)).unwrap();
+
+	let before_nodes: Vec<web_sys::Node> = {
+		let children = container.children();
+		(0..children.length()).map(|i| children.item(i).unwrap().unchecked_into()).collect()
+	};
+	assert_eq!(before_nodes.len(), N);
+
+	let reversed: Vec<VNode> = (0..N).rev().map(|i| li(&format!("k{i}"), &format!("item{i}"))).collect();
+	root.render(VNode::fragment(reversed)).unwrap();
+
+	let after_texts = collect_li_texts(&container);
+	let expected_texts: Vec<String> = (0..N).rev().map(|i| format!("item{i}")).collect();
+	assert_eq!(after_texts, expected_texts, "DOM order should exactly match the reversed key order");
+
+	let after_children = container.children();
+	for i in 0..N {
+		// Position i after reversal held key `k{N-1-i}` before, at position N-1-i.
+		let expected_node = &before_nodes[N - 1 - i];
+		assert!(
+			after_children.item(i as u32).unwrap().is_same_node(Some(expected_node)),
+			"node at position {i} after full reversal should be the same DOM node as before (moved, not recreated)"
+		);
+	}
+}
+
+#[wasm_bindgen_test]
+fn same_key_different_type_is_never_reused_across_a_diff() {
+	// find_match requires both key AND type_tag to match. A node that
+	// keeps the same key but changes tag must be torn down and rebuilt,
+	// not have its DOM node reused for the new type.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	root.render(VNode::fragment(vec![li("a", "Apple")])).unwrap();
+	let li_node = container.children().item(0).unwrap();
+	assert_eq!(li_node.tag_name().to_lowercase(), "li");
+
+	root.render(VNode::fragment(vec![VNode::tag("span").key("a").text("Apple-span").build()])).unwrap();
+
+	let span_node = container.children().item(0).unwrap();
+	assert_eq!(span_node.tag_name().to_lowercase(), "span", "changing tag under the same key must produce the new tag");
+	assert!(!span_node.is_same_node(Some(&li_node)), "same key with a different type must not reuse the old DOM node");
+}
+
+#[wasm_bindgen_test]
+fn key_reused_after_the_old_node_was_fully_unmounted_creates_a_fresh_dom_node() {
+	// A key is only meaningful within a single diff_children call. If the
+	// old tree with key "x" is fully unmounted (e.g. the list goes empty)
+	// and a *later*, independent render introduces a new node with the
+	// same key "x", that must be a fresh mount — there's no old_children
+	// list carrying it forward, so there's nothing to (and nothing should)
+	// be resurrected.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	root.render(VNode::fragment(vec![li("x", "First")])).unwrap();
+	let first_node = container.children().item(0).unwrap();
+
+	// Go empty — fully unmounts the "x" node.
+	root.render(VNode::fragment(vec![])).unwrap();
+	assert_eq!(container.children().length(), 0);
+
+	// Reintroduce key "x" in a later, independent render.
+	root.render(VNode::fragment(vec![li("x", "Second")])).unwrap();
+
+	assert_eq!(collect_li_texts(&container), vec!["Second"]);
+	let second_node = container.children().item(0).unwrap();
+	assert!(!second_node.is_same_node(Some(&first_node)), "a key reused after a full unmount must not reuse the old, already-torn-down DOM node");
+}
+
+// ─── Integration-level panic isolation ───
+//
+// Previously untested per task.md: "only unit-level error boundary tests
+// exist. Nothing exercises 'a panic deep in a subtree's effect/render
+// leaves sibling components still interactive' end-to-end". This drives a
+// deep, independently-failing subtree behind a boundary (via the Result
+// "throw" mechanism — see the module doc comment on why that's the real
+// path, not a panic) alongside a completely unrelated sibling elsewhere in
+// the tree, and checks the sibling keeps responding to its own setState
+// both before and after the failure.
+
+#[wasm_bindgen_test]
+fn sibling_component_stays_interactive_after_unrelated_subtree_fails_deep_inside_a_boundary() {
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	let caught: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+	let trigger: Rc<RefCell<Option<Rc<dyn Fn(bool)>>>> = Rc::new(RefCell::new(None));
+	let trigger_for_child = trigger.clone();
+
+	// A boundary wrapping a chain of nested components, the innermost of
+	// which can be told (independently, via its own setState) to fail.
+	let boundary = make_test_boundary("FailBoundary", caught.clone(), move || {
+		let trigger_for_child = trigger_for_child.clone();
+		VNode::tag("div")
+			.child(VNode::component(
+				"Middle",
+				ComponentFn::infallible(move |_props: Props| {
+					let trigger_for_child = trigger_for_child.clone();
+					VNode::component(
+						"DeepBoom",
+						ComponentFn::new(move |_props: Props| {
+							let (should_fail, set_should_fail) = micro_react::hooks::use_state(false);
+							*trigger_for_child.borrow_mut() = Some(set_should_fail);
+							if should_fail {
+								Err(wasm_bindgen::JsValue::from_str("deep failure"))
+							} else {
+								Ok(VNode::tag("span").text("deep ok").build())
+							}
+						}),
+						Vec::new(),
+					)
+				}),
+				Vec::new(),
+			))
+			.build()
+	});
+
+	// A completely unrelated sibling elsewhere in the tree with its own
+	// independent counter state.
+	let sibling_setter: Rc<RefCell<Option<Rc<dyn Fn(i32)>>>> = Rc::new(RefCell::new(None));
+	let sibling_setter_for_comp = sibling_setter.clone();
+	let sibling = VNode::component(
+		"Sibling",
+		ComponentFn::infallible(move |_props: Props| {
+			let (count, set_count) = micro_react::hooks::use_state(0i32);
+			*sibling_setter_for_comp.borrow_mut() = Some(set_count);
+			VNode::tag("p").attr("class", "sibling-count").text(count.to_string()).build()
+		}),
+		Vec::new(),
+	);
+
+	root.render(VNode::fragment(vec![boundary, sibling])).unwrap();
+	assert!(caught.borrow().is_none());
+	assert!(container.inner_html().contains("deep ok"));
+
+	// Sanity: sibling is interactive before the failure.
+	let set_sibling_count = sibling_setter.borrow().clone().expect("sibling should have registered its setter on mount");
+	set_sibling_count(1);
+	micro_react::scheduler::flush_rerenders();
+	assert!(
+		container.inner_html().contains("sibling-count\">1<"),
+		"sibling should be interactive before the failure, got: {}",
+		container.inner_html()
+	);
+
+	// Trigger the deep, independent failure.
+	let set_should_fail = trigger.borrow().clone().expect("DeepBoom should have registered its setter on mount");
+	set_should_fail(true);
+	micro_react::scheduler::flush_rerenders();
+
+	assert_eq!(caught.borrow().as_deref(), Some("deep failure"), "boundary should have caught the deep failure");
+	let html_after_failure = container.inner_html();
+	assert!(html_after_failure.contains("something broke"), "expected fallback UI after the failure, got: {html_after_failure}");
+	// The key assertion: the sibling, entirely outside the failing
+	// subtree, must still be present and must still respond to its own
+	// state updates after the failure elsewhere in the tree.
+	assert!(
+		html_after_failure.contains("sibling-count\">1<"),
+		"sibling should still be showing its last state right after the failure, got: {html_after_failure}"
+	);
+
+	set_sibling_count(2);
+	micro_react::scheduler::flush_rerenders();
+	let html_final = container.inner_html();
+	assert!(
+		html_final.contains("sibling-count\">2<"),
+		"sibling should still be interactive (able to rerender itself) after an unrelated subtree failed, got: {html_final}"
+	);
 }

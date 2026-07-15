@@ -1,4 +1,4 @@
-import { Hello } from "./inner.jsx";
+import { Helloxx as Hello } from "./inner.jsx";
 
 function Lol({ name }) {
   return <div class="hello-jsx">👋 Hello, {name}! (rendered from a real .jsx file)</div>;

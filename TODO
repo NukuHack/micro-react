@@ -1,0 +1,16 @@
+## low-severity issues
+
+**1. `window().expect("no window")` panics (`router.rs`)**
+Router code (`current_location`, `js_use_location`, history operations)
+unconditionally `.expect()`s a `Window`/`History`. Fine for a browser-only
+runtime today, but there's no graceful degradation if this is ever invoked
+before `window` exists (test harnesses, a future SSR path, etc.) — it'll
+hard panic rather than error. No action taken yet.
+
+**1. Silent fallback swallowing potential future clashes (`events.rs`)**
+`ensure_listeners` and similar spots do
+`dyn_into::<T>().unwrap_or_else(|_| default)` — if the `__mrListeners`
+object on an element were ever tampered with externally (e.g. by other
+library code sharing the same DOM node), listeners would be silently
+dropped rather than erroring. Low risk given the private-namespaced key,
+but fails silently, not loudly. No action taken yet.

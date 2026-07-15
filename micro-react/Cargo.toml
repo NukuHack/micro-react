@@ -54,3 +54,14 @@ wasm-bindgen-test = "0.3"
 opt-level   = "s"
 lto         = true
 codegen-units = 1
+# DO NOT set panic = "abort" here (or in [profile.dev]) without also
+# rewriting the error-isolation code in scheduler.rs/hooks.rs.
+# Effect cleanups and hook effect bodies are wrapped in
+# std::panic::catch_unwind specifically to keep one broken effect/component
+# from taking down the whole app. catch_unwind only works under the
+# "unwind" panic strategy; switching to "abort" (a common wasm
+# size-optimization) silently turns all of that isolation code into dead
+# weight, and any panic in an effect will hard-abort the entire runtime
+# instead of being contained. Pinned explicitly below so this can't
+# regress silently.
+panic = "unwind"

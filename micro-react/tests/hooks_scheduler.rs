@@ -27,7 +27,7 @@ use wasm_bindgen_test::*;
 use micro_react::context::{Context, use_context};
 use micro_react::hooks::*;
 use micro_react::render::Root;
-use micro_react::scheduler::flush_rerenders;
+use micro_react::scheduler::{MAX_FLUSH_ITERATIONS, flush_rerenders};
 use micro_react::vnode::{ComponentFn, Props, VNode};
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -408,4 +408,195 @@ fn use_context_unsubscribes_on_unmount_and_does_not_panic_on_later_change() {
 	// not a dangling-pointer dereference.
 	ctx.set_value(2);
 	flush_rerenders();
+}
+
+// ─── setState storms / re-entrancy (scheduler runaway-loop guard) ───
+//
+// Previously untested per task.md: "nothing exercises ... a component that
+// dirties itself from its own effect repeatedly ... there's no
+// runaway-loop guard visible in scheduler.rs, so an effect that
+// unconditionally calls its own setter could in principle starve the
+// flush loop indefinitely." scheduler.rs now caps a single
+// `flush_rerenders` call at `MAX_FLUSH_ITERATIONS` renders and defers the
+// rest instead of spinning forever; these tests prove that bound holds
+// (and that the test itself completes, rather than hanging the suite).
+
+#[wasm_bindgen_test]
+fn component_that_unconditionally_calls_its_own_setter_during_render_is_capped_not_infinite() {
+	// A component whose render body always calls its own setState (no
+	// condition, no dependency check) re-dirties itself every time it's
+	// rendered. Without a bail-out this would spin flush_rerenders()
+	// forever; with it, a single call renders at most
+	// MAX_FLUSH_ITERATIONS times and returns.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let render_count = Rc::new(RefCell::new(0u32));
+	let render_count_for_comp = render_count.clone();
+
+	let comp = ComponentFn::infallible(move |_props: Props| {
+		let (count, set_count) = use_state(0i32);
+		*render_count_for_comp.borrow_mut() += 1;
+		// Unconditionally re-dirty self on every render.
+		set_count(count + 1);
+		VNode::text(count.to_string())
+	});
+	root.render(VNode::component("SelfDirtying", comp, vec![])).unwrap();
+	let count_after_mount = *render_count.borrow();
+
+	// This must return promptly rather than hang the test runner.
+	flush_rerenders();
+
+	let total_renders = *render_count.borrow();
+	let renders_in_this_flush = total_renders - count_after_mount;
+	assert!(
+		renders_in_this_flush <= MAX_FLUSH_ITERATIONS,
+		"a single flush should never render more than MAX_FLUSH_ITERATIONS times, got {renders_in_this_flush}"
+	);
+	// The guard should actually have kicked in (the component keeps
+	// re-dirtying itself forever, so without a cap this would be
+	// unbounded) — otherwise this test would only prove the happy path.
+	assert_eq!(renders_in_this_flush, MAX_FLUSH_ITERATIONS, "expected the bail-out to trigger for a component that never stops re-dirtying itself");
+}
+
+#[wasm_bindgen_test]
+fn many_components_dirtying_within_the_same_flush_all_render_once_depth_sorted() {
+	// The "normal", non-runaway case the guard must not get in the way
+	// of: several independent components all becoming dirty inside the
+	// same microtask flush should each render exactly once, in
+	// depth-sorted (parents-before-children) order, well under the cap.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let order: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+	let setters: Rc<RefCell<Vec<Rc<dyn Fn(i32)>>>> = Rc::new(RefCell::new(Vec::new()));
+
+	let make_leaf = |name: &'static str, order: Rc<RefCell<Vec<&'static str>>>, setters: Rc<RefCell<Vec<Rc<dyn Fn(i32)>>>>| {
+		VNode::component(
+			name,
+			ComponentFn::infallible(move |_props: Props| {
+				let (n, set_n) = use_state(0i32);
+				order.borrow_mut().push(name);
+				setters.borrow_mut().push(set_n);
+				VNode::text(n.to_string())
+			}),
+			Vec::new(),
+		)
+	};
+
+	root.render(VNode::fragment(vec![
+		make_leaf("A", order.clone(), setters.clone()),
+		make_leaf("B", order.clone(), setters.clone()),
+		make_leaf("C", order.clone(), setters.clone()),
+	]))
+	.unwrap();
+	order.borrow_mut().clear();
+
+	// Dirty all three within the same tick, then drain once.
+	for setter in setters.borrow().iter() {
+		setter(1);
+	}
+	flush_rerenders();
+
+	assert_eq!(order.borrow().len(), 3, "each component should render exactly once for a single dirty flag flip each");
+}
+
+// ─── Raw-pointer hook access invariant (hooks.rs) ───
+//
+// Previously untested per task.md: the `unsafe` pointer access in
+// `hooks.rs` (`hooks_get_mut`, `current_inst`) relies on `ComponentInst`
+// never moving once rendering starts, and "there's no test that would
+// catch a future refactor accidentally breaking that invariant — it stays
+// correct by convention, not by the type system." This can't directly
+// assert on pointer stability (that's a type-system-level guarantee this
+// project has chosen not to encode), but it can be a regression net: many
+// components, each with several hooks (state + memo + effect), all
+// re-rendering repeatedly and reading each other's hook slots across
+// several flush cycles. If a refactor ever let a ComponentInst move (or
+// its Vec<HookSlot> reallocate) while a stale raw pointer from an earlier
+// render was still in use, this is the kind of test that would start
+// reading corrupted/mismatched hook values or panicking on a hook-type
+// mismatch.
+
+#[wasm_bindgen_test]
+fn many_components_with_multiple_hooks_stay_correct_across_repeated_rerenders() {
+	const COMPONENTS: usize = 15;
+	const ROUNDS: usize = 8;
+
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let setters: Rc<RefCell<Vec<(usize, Rc<dyn Fn(i32)>)>>> = Rc::new(RefCell::new(Vec::new()));
+
+	let make_comp = |i: usize, setters: Rc<RefCell<Vec<(usize, Rc<dyn Fn(i32)>)>>>| {
+		VNode::component(
+			format!("Comp{i}"),
+			ComponentFn::infallible(move |_props: Props| {
+				// Two independent state hooks plus a memo derived from both,
+				// so a mixed-up hook index/pointer would show up as a wrong
+				// value rather than just a missing update.
+				let (base, set_base) = use_state(i as i32 * 1000);
+				let (bump, _set_bump) = use_state(0i32);
+				let derived: i32 = use_memo(move || base + bump, Some(vec![DepVal(format!("{base}:{bump}"))]));
+				setters.borrow_mut().push((i, set_base));
+				// Tagged element (not a bare text node) so each component's
+				// output is unambiguously locatable in inner_html, unlike
+				// concatenated sibling text nodes which would run together.
+				VNode::tag("span").attr("data-i", i.to_string()).text(derived.to_string()).build()
+			}),
+			Vec::new(),
+		)
+	};
+
+	let comps: Vec<VNode> = (0..COMPONENTS).map(|i| make_comp(i, setters.clone())).collect();
+	root.render(VNode::fragment(comps)).unwrap();
+
+	// Snapshot each component's setter, keyed by its own index `i` (baked
+	// into the closure at mount time), so later rounds can target specific
+	// components regardless of re-render order.
+	let setters_by_index: std::collections::HashMap<usize, Rc<dyn Fn(i32)>> = setters.borrow_mut().drain(..).collect();
+	assert_eq!(setters_by_index.len(), COMPONENTS);
+	let mut expected: Vec<i32> = (0..COMPONENTS as i32).map(|i| i * 1000).collect();
+
+	for round in 1..=ROUNDS {
+		// Only re-dirty a subset each round, so hook indices/pointers for
+		// the untouched components must still resolve correctly even
+		// though siblings are actively re-rendering around them.
+		for i in 0..COMPONENTS {
+			if i % 3 == round % 3
+				&& let Some(setter) = setters_by_index.get(&i)
+			{
+				let new_val = (i as i32 * 1000) + round as i32;
+				setter(new_val);
+				expected[i] = new_val;
+			}
+		}
+		flush_rerenders();
+
+		// Verify every component's own value is exactly what it was last
+		// set to, and that the derived memo used *that same* component's
+		// base, not a neighbor's — the classic symptom of a stale/aliased
+		// raw pointer or a mixed-up hook index after a refactor.
+		let html = container.inner_html();
+		for i in 0..COMPONENTS {
+			let expected_marker = format!("data-i=\"{i}\">{}<", expected[i]);
+			assert!(
+				html.contains(&expected_marker),
+				"round {round}: expected marker {expected_marker:?} not found in {html:?} — possible hook slot cross-talk between components"
+			);
+		}
+	}
+
+	// Final sanity: after all rounds, updating one specific component still
+	// only affects that component's own output, not a neighbor's.
+	if let Some(setter) = setters_by_index.get(&0) {
+		setter(99999);
+		flush_rerenders();
+		let html = container.inner_html();
+		assert!(
+			html.contains("data-i=\"0\">99999<"),
+			"setting component 0's state should only affect component 0's own rendered value, got {html:?}"
+		);
+		for i in 1..COMPONENTS {
+			let expected_marker = format!("data-i=\"{i}\">{}<", expected[i]);
+			assert!(html.contains(&expected_marker), "component {i} should be unaffected by component 0's update, got {html:?}");
+		}
+	}
 }

@@ -276,6 +276,101 @@ mod tests {
 		assert!(!code.contains("export "));
 	}
 
+	// ─── parser boundary: syntax this hand-rolled parser does and doesn't
+	// support (task.md: "worth deciding explicitly what subset of import
+	// syntax is officially supported and documenting/testing the boundary
+	// rather than leaving it implicit") ───
+
+	#[test]
+	fn dynamic_import_is_correctly_left_alone_not_mistaken_for_a_static_import() {
+		// import(...) is a runtime expression, not a static import
+		// declaration — parse_import_line requires whitespace right after
+		// "import", so "import(" correctly fails to match and the line is
+		// left as ordinary code.
+		let src = "const mod = await import('./lazy.js');";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src);
+		assert!(specifiers.is_empty());
+	}
+
+	#[test]
+	fn multi_line_import_is_not_supported_left_untouched_as_plain_code() {
+		// Documents a known boundary: parse_import_line matches a whole
+		// *line*, so an import statement split across multiple lines is
+		// not recognized at all — none of its lines get extracted, and the
+		// import is silently left in the output as-is (not stripped, not
+		// resolved). This is the documented limitation from task.md, not
+		// a crash — pinning it down here so a future change to this
+		// behavior is a deliberate, visible diff instead of a surprise.
+		let src = "import {\n  a,\n  b\n} from 'lib';\nuse(a, b);";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src, "multi-line imports are not rewritten (known unsupported boundary)");
+		assert!(specifiers.is_empty(), "multi-line imports are not extracted as specifiers (known unsupported boundary)");
+	}
+
+	#[test]
+	fn line_comment_after_import_on_the_same_line_prevents_a_match() {
+		// A `//` comment after the closing quote makes the "nothing
+		// trailing except an optional semicolon" check fail, so the whole
+		// line is left untouched rather than partially parsed. Documents
+		// current (conservative — fails closed, not silently wrong)
+		// behavior.
+		let src = "import { a } from 'lib'; // pulls in a\nuse(a);";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src, "a trailing same-line comment is not stripped, so the line is left as-is (known unsupported boundary)");
+		assert!(specifiers.is_empty());
+	}
+
+	#[test]
+	fn import_type_named_is_ignored_not_misparsed_as_a_default_import_literally_named_type() {
+		// Regression test for a real bug this review surfaced: `import
+		// type { Foo } from '...'` (TypeScript type-only import, no
+		// runtime binding at all) used to fall through to the
+		// default-import branch and get extracted as `default_name:
+		// "type"` plus a bogus named import — silently wrong rather than
+		// safely ignored. It's now recognized and left untouched, since
+		// there's no runtime specifier to extract.
+		let src = "import type { Foo } from 'lib';\nuse(Foo);";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src, "type-only imports carry no runtime binding and should be left untouched, not misparsed");
+		assert!(specifiers.is_empty());
+	}
+
+	#[test]
+	fn import_type_default_is_also_ignored() {
+		let src = "import type Foo from 'lib';\nuse(Foo);";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src);
+		assert!(specifiers.is_empty());
+	}
+
+	#[test]
+	fn a_default_import_literally_named_type_is_still_parsed_correctly() {
+		// `type` is not a reserved word, so `import type from '...'` is
+		// legal JS/TS meaning "import the default export and bind it to
+		// the local name `type`" — the *next* token being `from` (rather
+		// than another binding) is what disambiguates this from the
+		// type-only-import modifier case above.
+		let (code, specifiers) = prepare_module_str("import type from 'lib';\nuse(type);");
+		assert_eq!(code, "\nuse(type);");
+		assert_eq!(specifiers.len(), 1);
+		assert_eq!(specifiers[0].default_name, Some("type".to_string()));
+	}
+
+	#[test]
+	fn import_assertion_clause_is_not_supported_left_untouched() {
+		// `import data from './data.json' with { type: 'json' }` — the
+		// trailing `with { ... }` clause means there's content after the
+		// closing quote besides an optional `;`, so the "nothing trailing"
+		// check fails and the whole line is left unparsed. Documents the
+		// known unsupported boundary rather than silently dropping the
+		// assertion and treating it as a plain import.
+		let src = "import data from './data.json' with { type: 'json' };\nuse(data);";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(code, src, "import assertions/attributes are not supported (known unsupported boundary)");
+		assert!(specifiers.is_empty());
+	}
+
 	#[test]
 	fn realistic_module_with_import_and_export_together() {
 		let src = "import { helper } from './util.js';\nexport function useIt() { return helper(); }\n";
