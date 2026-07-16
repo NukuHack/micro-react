@@ -3,6 +3,7 @@
 //! against the browser's current location.
 
 use js_sys::{Function, Object, Reflect};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::{JsCast, prelude::*};
 
@@ -45,8 +46,17 @@ impl Pattern {
 
 	/// Returns `Some(params)` if `path` matches, `None` otherwise.
 	pub fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
-		// Uses JS RegExp via js_sys since the `regex` crate is too heavy for WASM.
-		let re = js_sys::RegExp::new(&self.regex, "");
+		// Uses JS RegExp via js_sys since the `regex` crate is too heavy for WASM. Cached per
+		// pattern string (like html.rs's per-call-site template cache) since Router/Link
+		// re-match every render and recompiling the same RegExp each time is wasted work.
+		let re = REGEX_CACHE.with(|c| {
+			if let Some(re) = c.borrow().get(&self.regex) {
+				return re.clone();
+			}
+			let re = js_sys::RegExp::new(&self.regex, "");
+			c.borrow_mut().insert(self.regex.clone(), re.clone());
+			re
+		});
 		let result = re.exec(path);
 		match result {
 			None => None,
@@ -62,6 +72,11 @@ impl Pattern {
 			}
 		}
 	}
+}
+
+thread_local! {
+	/// Compiled `RegExp` per pattern string, avoiding a fresh compile on every render.
+	static REGEX_CACHE: RefCell<HashMap<String, js_sys::RegExp>> = RefCell::new(HashMap::new());
 }
 
 fn regex_escape(s: &str) -> String {

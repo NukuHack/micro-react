@@ -12,8 +12,16 @@
 //! surface (`compile` + `matches`) exactly as `router.rs`'s own
 //! `js_router` does, rather than reaching into internals.
 
-use micro_react::router::Pattern;
+use std::cell::RefCell;
+use std::rc::Rc;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
+
+use micro_react::hooks::use_state;
+use micro_react::render::Root;
+use micro_react::router::{Pattern, js_use_navigate};
+use micro_react::scheduler::flush_rerenders;
+use micro_react::vnode::{ComponentFn, Props, VNode};
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -96,4 +104,46 @@ fn empty_pattern_matches_only_root() {
 	let p = Pattern::compile("");
 	assert!(p.matches("/").is_some());
 	assert!(p.matches("/x").is_none());
+}
+
+// ─── useNavigate memoization ───
+
+fn make_container() -> web_sys::Element {
+	let doc = web_sys::window().unwrap().document().unwrap();
+	let el = doc.create_element("div").unwrap();
+	doc.body().unwrap().append_child(&el).unwrap();
+	el
+}
+
+// `useNavigate` wraps its closure in `use_memo` with empty deps so the same
+// `Closure`/`JsValue` is handed back on every render instead of a fresh one
+// leaking each time. This drives two renders of the same component instance
+// and checks the returned JsValue is the same JS function reference both times.
+#[wasm_bindgen_test]
+fn use_navigate_returns_same_closure_across_rerenders() {
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let captured: Rc<RefCell<Vec<JsValue>>> = Rc::new(RefCell::new(Vec::new()));
+	let captured_for_comp = captured.clone();
+	let setter_slot: Rc<RefCell<Option<Rc<dyn Fn(i32)>>>> = Rc::new(RefCell::new(None));
+	let setter_slot_for_comp = setter_slot.clone();
+
+	let comp = ComponentFn::infallible(move |_props: Props| {
+		let (_tick, set_tick) = use_state(0i32);
+		*setter_slot_for_comp.borrow_mut() = Some(set_tick);
+		captured_for_comp.borrow_mut().push(js_use_navigate());
+		VNode::text("x")
+	});
+	root.render(VNode::component("NavComp", comp, vec![])).unwrap();
+	assert_eq!(captured.borrow().len(), 1, "expected exactly one render so far");
+
+	// Force a second render of the same instance via setState, not a fresh mount.
+	let setter = setter_slot.borrow().clone().unwrap();
+	setter(1);
+	flush_rerenders();
+	assert_eq!(captured.borrow().len(), 2, "expected the re-render to have happened");
+
+	let first = captured.borrow()[0].clone();
+	let second = captured.borrow()[1].clone();
+	assert!(first.loose_eq(&second), "useNavigate should return the same memoized closure across re-renders, not a fresh one each time");
 }

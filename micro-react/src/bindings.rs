@@ -441,7 +441,19 @@ pub fn js_use_id() -> String {
 /// `createContext(defaultValue)` — returns a JS context object.
 #[wasm_bindgen(js_name = createContext)]
 pub fn js_create_context(default_value: JsValue) -> Result<JsValue, JsValue> {
-	use crate::context::Context;
+	use crate::context::{Context, record_create_context_call};
+
+	let call_count = record_create_context_call();
+	if call_count > 1 {
+		crate::console_warn!(
+			"[micro-react] createContext has been called {} times. Each call leaks a Box and 3 \
+			 Closures for the lifetime of the page, which is fine if this is {} distinct contexts \
+			 declared at module scope, but leaks unboundedly if createContext is being called from \
+			 inside a component body on every render — call it once per context outside your component.",
+			call_count,
+			call_count
+		);
+	}
 
 	// Leaked into a 'static reference: safe, the WASM module lives forever
 	// and the context is never freed.

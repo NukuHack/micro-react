@@ -1,11 +1,11 @@
+ai prompt : 
+fix what you can when done remove it from the TODO , if something is too complex and would required a big rewrite don't touch it
+read md before any modification do not run or compile the code, only unzip
+
 ## Bugs
+none (afaik)
 
-**1. `createContext` leaks a `Box` + 3 `Closure`s per call — fine only if used exactly like React (called once at module scope).**
-This is explicitly documented as intentional ("the WASM module lives forever and the context is never freed"), which is a reasonable trade-off for the *normal* usage pattern. But nothing prevents a user from calling `createContext` inside a component body (a common React footgun), and if they do, this leaks with every render. Worth either detecting/warning on repeated calls, or documenting loudly for consumers.
-
-**2. `Router`/`Link` route matching recompiles a `js_sys::RegExp` from scratch for every pattern on every render**, unlike `html.rs`'s template compilation which is explicitly cached per call-site. Not a correctness bug, but for any app with more than a handful of routes it's needless per-render work — and it's the kind of thing that's easy to miss because it doesn't show up until you have a route-heavy app.
-
-## Design/soundness notes (not necessarily bugs, but worth knowing)
+## Design/soundness notes
 
 - **Raw-pointer hook dispatch (`hooks.rs`)**: `CURRENT_INST` is a `*mut ComponentInst` used via macros (`hooks_ref!`, `hooks_get_mut`, etc.) with `unsafe` blocks justified by "WASM is single-threaded, inst is valid for the render's duration." That's true today, but it's a hard invariant resting entirely on nothing calling back into JS in a way that could re-enter and mutate `hooks` while a `&mut` slot reference from `hooks_get_mut` (which is literally `&'static mut`, an aggressive lifetime cheat) is alive. The reentrant-render handling (`render_generation`) suggests the author is aware of this risk and has thought about it, but this is the single place I'd want the most scrutiny/fuzzing before trusting it in production, since the failure mode of getting it wrong is silent UB, not a panic.
 - **`VNODE_STORE`**: raw `Box::into_raw`/`from_raw` was deliberately avoided in favor of an id-keyed map with idempotent removal — good instinct — but the "leak guard" only *warns* at 10,000 unconsumed entries via console; it doesn't actually reclaim anything. If a JS caller repeatedly constructs vnodes it never passes to render (e.g., a conditional branch that discards a built tree), this grows forever with only a log line to notice it.
@@ -13,7 +13,4 @@ This is explicitly documented as intentional ("the WASM module lives forever and
 
 ## Test coverage gaps
 
-- Still no dedicated test exercising `useNavigate`'s memoization (i.e. asserting the same `Closure`/`JsValue` is returned across re-renders rather than a fresh one each time) — worth adding now that it's memoized via `use_memo`.
-- I didn't see fuzz/property tests around the reconciler's `find_match`/skew logic for adversarial reorderings (duplicate keys, all-`None` keys mixed with keyed siblings) — the unit tests in `tests/reconciler.rs` look like they cover the common cases but I'd want stress tests with large randomized shuffles before trusting keyed lists at scale.
-- Nothing exercises the `MAX_FLUSH_ITERATIONS` runaway-render bailout under genuinely concurrent/nested `setState`-storming scenarios beyond what's in `hooks_scheduler.rs` — worth checking that test actually drives 1000+ iterations rather than asserting the constant exists.
-- The unsafe raw-pointer hook path has no Miri run mentioned anywhere (`check.sh`/`build.sh` might run it — worth confirming) — given `unsafe` is concentrated there, this is the highest-value place to add Miri/loom-style testing.
+none (afaik)

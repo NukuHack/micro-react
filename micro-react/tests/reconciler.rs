@@ -480,6 +480,136 @@ fn large_keyed_list_full_reversal_relocates_every_node_without_recreation() {
 	}
 }
 
+// A tiny deterministic xorshift PRNG. Not pulled in as an external `proptest`
+// dependency (per CONTRIBUTING.md's dependency policy, that'd need its own
+// justification/issue) and, more importantly, proptest's shrinking/threading
+// assumes a native std target — it doesn't run inside `wasm-bindgen-test`'s
+// wasm32 browser harness, which is what `find_match`/`diff_children` require
+// here since they touch a real DOM. This gives the same "large randomized
+// shuffle" coverage the review asked for, deterministically and per-target.
+struct Xorshift32(u32);
+
+impl Xorshift32 {
+	fn new(seed: u32) -> Self {
+		Xorshift32(if seed == 0 { 0xdead_beef } else { seed })
+	}
+
+	fn next_u32(&mut self) -> u32 {
+		let mut x = self.0;
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		self.0 = x;
+		x
+	}
+
+	// Returns a value in `0..bound`.
+	fn below(&mut self, bound: usize) -> usize {
+		(self.next_u32() as usize) % bound
+	}
+
+	fn shuffle<T>(&mut self, items: &mut [T]) {
+		for i in (1..items.len()).rev() {
+			let j = self.below(i + 1);
+			items.swap(i, j);
+		}
+	}
+}
+
+#[wasm_bindgen_test]
+fn stress_random_reorderings_of_keyed_list_never_panic_and_end_in_key_order() {
+	// Large randomized shuffles of a purely keyed list across many seeds/sizes.
+	// This doesn't assert on *which* DOM nodes moved (that's covered exactly
+	// by the full-reversal test above); it asserts the invariant that must
+	// hold for every possible permutation: no panic, and the resulting DOM
+	// order always matches the new key order exactly.
+	for seed in 1..=30u32 {
+		let mut rng = Xorshift32::new(seed);
+		let n = 5 + rng.below(35); // sizes from 5 to 39
+
+		let container = make_container();
+		let mut root = Root::new(container.clone());
+
+		let mut keys: Vec<usize> = (0..n).collect();
+		let initial: Vec<VNode> = keys.iter().map(|k| li(&format!("k{k}"), &format!("item{k}"))).collect();
+		root.render(VNode::fragment(initial)).unwrap();
+
+		// Several successive random reorderings against the same live tree,
+		// so each diff starts from whatever the previous shuffle produced —
+		// not always a fresh mount.
+		for _ in 0..4 {
+			rng.shuffle(&mut keys);
+			let shuffled: Vec<VNode> = keys.iter().map(|k| li(&format!("k{k}"), &format!("item{k}"))).collect();
+			root.render(VNode::fragment(shuffled)).unwrap();
+
+			let expected_texts: Vec<String> = keys.iter().map(|k| format!("item{k}")).collect();
+			assert_eq!(collect_li_texts(&container), expected_texts, "seed {seed}: DOM order must match the new key order after a random shuffle");
+		}
+	}
+}
+
+#[wasm_bindgen_test]
+fn stress_random_reorderings_with_duplicate_and_unkeyed_siblings_never_panic() {
+	// Adversarial mix the review specifically called out: duplicate keys
+	// interleaved with unkeyed (`None`-key) siblings, then shuffled at
+	// random. `find_match` only ever compares `(key, type_tag)`, and
+	// unkeyed nodes all share `key() == None`, so this exercises the path
+	// where many candidates are simultaneously "equally eligible" and the
+	// bidirectional skew search has to pick consistently among them without
+	// panicking, double-matching, or losing/duplicating a DOM node.
+	for seed in 1..=30u32 {
+		let mut rng = Xorshift32::new(seed);
+		let n = 6 + rng.below(24); // sizes from 6 to 29
+
+		// Build a pool of items: about a third unkeyed, a third with a key
+		// duplicated across two items, and the remainder uniquely keyed.
+		let mut pool: Vec<(Option<String>, String)> = Vec::with_capacity(n);
+		for i in 0..n {
+			let text = format!("item{i}");
+			let entry = match i % 3 {
+				0 => (None, text),
+				1 => (Some(format!("dup{}", i / 3)), text),
+				_ => (Some(format!("uniq{i}")), text),
+			};
+			pool.push(entry);
+		}
+
+		let container = make_container();
+		let mut root = Root::new(container.clone());
+
+		let build = |items: &[(Option<String>, String)]| -> Vec<VNode> {
+			items
+				.iter()
+				.map(|(key, text)| {
+					let mut b = VNode::tag("li").text(text);
+					if let Some(k) = key {
+						b = b.key(k.clone());
+					}
+					b.build()
+				})
+				.collect()
+		};
+
+		root.render(VNode::fragment(build(&pool))).unwrap();
+		assert_eq!(collect_li_texts(&container), pool.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>());
+
+		for _ in 0..4 {
+			rng.shuffle(&mut pool);
+			// This must not panic even though several entries share the
+			// same (key, type_tag) identity (all unkeyed `li`s, and the
+			// `dup*` pairs).
+			root.render(VNode::fragment(build(&pool))).unwrap();
+
+			let expected_texts: Vec<String> = pool.iter().map(|(_, t)| t.clone()).collect();
+			assert_eq!(
+				collect_li_texts(&container),
+				expected_texts,
+				"seed {seed}: DOM text order must always match input order regardless of key collisions"
+			);
+		}
+	}
+}
+
 #[wasm_bindgen_test]
 fn same_key_different_type_is_never_reused_across_a_diff() {
 	// find_match requires both key AND type_tag to match. A node that

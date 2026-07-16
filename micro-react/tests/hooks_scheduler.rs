@@ -459,6 +459,72 @@ fn component_that_unconditionally_calls_its_own_setter_during_render_is_capped_n
 }
 
 #[wasm_bindgen_test]
+fn sibling_components_dirtying_each_other_during_render_are_still_capped() {
+	// The single self-dirtying component above only proves the cap holds
+	// for one component re-dirtying *itself*. Real setState-storms are
+	// often several components dirtying *each other* mid-render — A's
+	// render calls B's setter and vice versa, so the dirty queue never
+	// runs dry on its own. This drives that mutually-recursive case and
+	// checks the same MAX_FLUSH_ITERATIONS bound still holds, and that a
+	// single flush_rerenders() call still returns promptly rather than
+	// live-locking on the cross-dirtying.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let render_count = Rc::new(RefCell::new(0u32));
+	let render_count_for_a = render_count.clone();
+	let render_count_for_b = render_count.clone();
+	let b_setter: Rc<RefCell<Option<Rc<dyn Fn(i32)>>>> = Rc::new(RefCell::new(None));
+	let b_setter_for_a = b_setter.clone();
+	let a_setter: Rc<RefCell<Option<Rc<dyn Fn(i32)>>>> = Rc::new(RefCell::new(None));
+	let a_setter_for_b = a_setter.clone();
+	let a_setter_for_a = a_setter.clone();
+
+	let comp_a = ComponentFn::infallible(move |_props: Props| {
+		let (count, set_count) = use_state(0i32);
+		*a_setter_for_a.borrow_mut() = Some(set_count);
+		*render_count_for_a.borrow_mut() += 1;
+		// Every render of A unconditionally dirties B, and vice versa below.
+		if let Some(set_b) = b_setter_for_a.borrow().clone() {
+			set_b(count + 1);
+		}
+		VNode::text(count.to_string())
+	});
+	let comp_b = ComponentFn::infallible(move |_props: Props| {
+		let (count, set_count) = use_state(0i32);
+		*b_setter.borrow_mut() = Some(set_count);
+		*render_count_for_b.borrow_mut() += 1;
+		if let Some(set_a) = a_setter_for_b.borrow().clone() {
+			set_a(count + 1);
+		}
+		VNode::text(count.to_string())
+	});
+
+	root.render(VNode::fragment(vec![VNode::component("A", comp_a, Vec::new()), VNode::component("B", comp_b, Vec::new())])).unwrap();
+	let count_after_mount = *render_count.borrow();
+
+	// Nudge one of them so the mutual-dirtying cycle actually starts —
+	// on mount neither setter existed yet for the other to call.
+	let kick = a_setter.borrow().clone().expect("A should have rendered at least once during mount");
+	kick(1);
+
+	// This must return promptly rather than hang the test runner, exactly
+	// like the single-component case — a live-lock here would mean the
+	// cap only protects against self-dirtying, not the more general
+	// cross-component storming case.
+	flush_rerenders();
+
+	let renders_in_this_flush = *render_count.borrow() - count_after_mount;
+	assert!(
+		renders_in_this_flush <= MAX_FLUSH_ITERATIONS,
+		"a single flush should never render more than MAX_FLUSH_ITERATIONS times total across all components, got {renders_in_this_flush}"
+	);
+	assert_eq!(
+		renders_in_this_flush, MAX_FLUSH_ITERATIONS,
+		"expected the bail-out to trigger for two components that keep re-dirtying each other forever"
+	);
+}
+
+#[wasm_bindgen_test]
 fn many_components_dirtying_within_the_same_flush_all_render_once_depth_sorted() {
 	// The "normal", non-runaway case the guard must not get in the way
 	// of: several independent components all becoming dirty inside the

@@ -12,6 +12,17 @@ use std::{
 
 static CTX_ID_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Counts total `createContext` calls across the module's lifetime. Each call leaks a
+/// `Box<Context<_>>` plus 3 `Closure`s, which is fine for the intended usage (called once
+/// per context at module scope) but leaks on every render if called from a component body.
+static CTX_CREATE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Records a `createContext` call and returns the running total. Callers should warn once
+/// this exceeds 1, since legitimate usage only calls `createContext` once per context.
+pub fn record_create_context_call() -> u64 {
+	CTX_CREATE_COUNT.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// Maps context_id -> list of waker callbacks.
 type ListenerMap = HashMap<u64, Vec<Rc<dyn Fn()>>>;
 
