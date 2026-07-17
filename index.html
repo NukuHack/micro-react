@@ -10,8 +10,9 @@
 <div id="root"></div>
 
 <script>
-if(sessionStorage.redirect){
-  history.replaceState(null,'',sessionStorage.redirect);
+/// this for 404's custom redirect
+if (sessionStorage.redirect) {
+  history.replaceState(null, '', sessionStorage.redirect);
   sessionStorage.removeItem('redirect');
 }
 </script>
@@ -27,7 +28,10 @@ window.Fragment = MicroReact.getFragment();
 window.ErrorBoundary = MicroReact.createErrorBoundary();
 window.html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
 
-window.loadJsxModule = MicroReact.loadJsxModule;
+window.loadJsx = MicroReact.loadJsx;
+window.jsx = MicroReact.jsx;
+window.ejsx = (txt) => eval(jsx(txt));
+
 // Make everything available globally
 // Object.assign(window, MicroReact);
 window.useState = MicroReact.useState;
@@ -47,7 +51,75 @@ window.useLocation = MicroReact.useLocation;
 window.useNavigate = MicroReact.useNavigate;
 window.render = MicroReact.render;
 
-await import('./script.js');
+
+
+// ─── THEME CONTEXT ───
+const ThemeCtx = createContext({ name: 'dark', label: 'Dark' });
+const themes = [
+  { name: 'dark',  label: '🌑 Dark'  },
+  { name: 'light', label: '☀️ Light' },
+  { name: 'neon',  label: '🟩 Neon'  },
+];
+
+// ─── NAV ───
+function Nav() {
+  const { path } = useLocation();
+  return html`
+    <nav>
+      <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
+      <${Link} to="/" class="nav-link${path === '/' ? ' active' : ''}">🏠 Home</${Link}>
+      <${Link} to="/about" class="nav-link${path === '/about' ? ' active' : ''}">📖 About</${Link}>
+      <${Link} to="/hello" class="nav-link${path === '/hello' ? ' active' : ''}">👋 Hello</${Link}>
+    </nav>
+  `;
+}
+
+// ─── SHELL ───
+function Shell({ themeIdx, setThemeIdx, Page }) {
+  
+  return html`
+    <${Fragment}>
+      <${Nav} />
+      <${Page} ThemeCtx=${ThemeCtx}/>
+      <div style="position:fixed;bottom:1.25rem;right:1.25rem;display:flex;gap:.4rem;z-index:999;background:var(--surface);border:1px solid var(--border);padding:.4rem;border-radius:10px">
+        ${themes.map((t, i) => html`
+          <button key="${t.name}" class="btn-ghost btn-sm${themeIdx === i ? ' btn-primary' : ''}" onclick="${() => setThemeIdx(i)}" title="${t.label}">${t.label.split(' ')[0]}</button>
+        `)}
+      </div>
+    </${Fragment}>
+  `;
+}
+
+// ─── APP ROOT  (provides theme context + router) ───
+function App() {
+  const [themeIdx, setThemeIdx] = useState(0);
+  const theme = themes[themeIdx];
+
+  const routes = {
+    '/':      () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${HomePage} />`,
+    '/about': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${AboutPage} />`,
+    '/hello': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${HelloPage} />`,
+    '*': () => html`<${Shell} themeIdx="${themeIdx}" setThemeIdx="${setThemeIdx}" Page=${NotFound} />`,
+  };
+
+  return html`
+    <${ThemeCtx.Provider} value="${theme}">
+      <${Router} routes="${routes}" />
+    </${ThemeCtx.Provider}>
+  `;
+}
+
+// ─── JSX LOADER DEMO ───
+const [
+  { default: HomePage }, { default: HelloPage },
+  { default: NotFound }, { default: AboutPage }
+] = await Promise.all([
+  loadJsx('./home.jsx'), loadJsx('./hello.jsx'),
+  loadJsx('./404.jsx'), loadJsx('./about.jsx')
+]);
+
+window.__root = await render(ejsx(`<App />`), document.getElementById('root'));
 </script>
+
 </body>
 </html>

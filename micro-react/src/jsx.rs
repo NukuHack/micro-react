@@ -251,7 +251,7 @@ pub fn transpile_jsx_str(source: &str) -> Result<String, JsxError> {
 
 /// Transpiles JSX source text into plain JS, splicing `` html`...` `` calls
 /// in place of each JSX root and leaving everything else untouched.
-#[wasm_bindgen(js_name = transpileJsx)]
+#[wasm_bindgen(js_name = jsx)]
 pub fn transpile_jsx(source: &str) -> Result<JsValue, JsValue> {
 	transpile_jsx_str(source).map(|s| JsValue::from_str(&s)).map_err(|e| JsValue::from_str(&e.to_string()))
 }
@@ -265,7 +265,7 @@ struct JsxModuleRecord {
 }
 
 /// Recursively loads, transpiles, and executes a JSX module in the browser.
-#[wasm_bindgen(js_name = loadJsxModule)]
+#[wasm_bindgen(js_name = loadJsx)]
 pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsValue, JsValue> {
 	let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
 
