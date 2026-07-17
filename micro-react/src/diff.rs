@@ -281,6 +281,37 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 		_ => unreachable!(),
 	};
 
+	// diff_node_inner dispatches purely on new_vnode's own variant, so unlike
+	// sibling lists (gated by find_match's type_tag+key check before this is
+	// ever reached) a component's *own* single-child render output — e.g.
+	// `<Outlet/>` swapping from one matched route's page to another's, or any
+	// component conditionally returning a different component type as its
+	// root — arrives here with an `old_vnode` that's simply "whatever used to
+	// be here", not necessarily the same component. Without this check we'd
+	// hand a totally unrelated component's hooks/DOM state to this render.
+	let type_mismatch = old_vnode.is_some_and(|o| o.type_tag() != new_vnode.type_tag() || o.key() != new_vnode.key());
+	// Captured before unmount_vnode below (skip_remove=true leaves it
+	// attached) so we can atomically swap it for the freshly-mounted DOM
+	// once that's ready, instead of leaving it as a permanent orphan.
+	let stale_dom: Option<Node> = if type_mismatch { old_vnode.and_then(|o| o._dom.clone()) } else { None };
+	if type_mismatch {
+		// Tear the mismatched instance down properly (effect cleanups etc.)
+		// instead of leaking it or letting it silently masquerade as this
+		// render's old tree. skip_remove=true, matching diff_element's own
+		// mismatch branch: this call is nested inside whatever ancestor
+		// diff_children loop is diffing our sibling list, and that loop
+		// already captured a live reference to this old DOM node as its
+		// next insertion anchor before recursing in here. Eagerly detaching
+		// it now (skip_remove=false) yanks that anchor out from under the
+		// in-progress loop, so its next insert_before(new, anchor) throws
+		// NotFoundError. Leaving it attached for now keeps that anchor
+		// valid; we swap it out ourselves below once the new DOM exists,
+		// via insert_before+remove_child rather than the ancestor's stale
+		// reference, and before the ancestor ever looks at this slot again.
+		unmount_vnode(old_vnode.unwrap(), true);
+	}
+	let old_vnode = if type_mismatch { None } else { old_vnode };
+
 	// Reuse the component instance across re-renders (matched by diff_children
 	// via type+key), so hooks (state, refs, effects) survive across renders.
 	let reused_inst: Option<Rc<RefCell<ComponentInst>>> = old_vnode.and_then(|o| match &o.inner {
@@ -446,6 +477,20 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// current DOM rather than this call's possibly-stale `dom`, so the
 	// parent's tree always has an accurate reference for this slot.
 	new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+
+	// Finish the swap started above: the mismatched old node (if any) is
+	// still attached at its original position. Splice the new one in right
+	// beside it, then drop the old — both calls target `parent_dom`
+	// directly, so this doesn't depend on (or disturb) whatever anchor an
+	// ancestor diff_children loop is currently holding.
+	if let Some(stale) = stale_dom {
+		if let Some(new_dom) = &new_vnode._dom {
+			parent_dom.insert_before(new_dom, Some(&stale))?;
+		}
+		if let Some(p) = stale.parent_node() {
+			let _ = p.remove_child(&stale);
+		}
+	}
 
 	// Stash the (possibly newly-created) instance on the new vnode so the
 	// *next* render can find it via old_vnode.

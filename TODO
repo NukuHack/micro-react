@@ -5,19 +5,23 @@ read md before any modification do not run or compile the code, only unzip
 ## Bugs
 Outlet does not pass it's props, to the inner stuff
 
-## Design/soundness notes
-
-- **Raw-pointer hook dispatch (`hooks.rs`)**: `CURRENT_INST` is a `*mut ComponentInst` used via macros (`hooks_ref!`, `hooks_get_mut`, etc.) with `unsafe` blocks justified by "WASM is single-threaded, inst is valid for the render's duration." That's true today, but it's a hard invariant resting entirely on nothing calling back into JS in a way that could re-enter and mutate `hooks` while a `&mut` slot reference from `hooks_get_mut` (which is literally `&'static mut`, an aggressive lifetime cheat) is alive. The reentrant-render handling (`render_generation`) suggests the author is aware of this risk and has thought about it, but this is the single place I'd want the most scrutiny/fuzzing before trusting it in production, since the failure mode of getting it wrong is silent UB, not a panic.
-- **`VNODE_STORE`**: raw `Box::into_raw`/`from_raw` was deliberately avoided in favor of an id-keyed map with idempotent removal — good instinct — but the "leak guard" only *warns* at 10,000 unconsumed entries via console; it doesn't actually reclaim anything. If a JS caller repeatedly constructs vnodes it never passes to render (e.g., a conditional branch that discards a built tree), this grows forever with only a log line to notice it.
-- **`dangerouslySetInnerHTML`** and the general prop-setting path look correctly scoped (opt-in only, not the default path), and text nodes go through `create_text_node`, so ordinary text content isn't an XSS vector.
-
 ## Test coverage gaps
 
 Router and stuff
 Vnode's inner stuff
 
-
-
 ## Plans for extension :
 
 <Navigate to="/" replace /> // the replace part is important for redirect !!
+
+<Outlet context={{ a, b, c }} />
+// Child component
+function Dashboard() {
+  const { a, b, c } = useOutletContext();
+}
+
+## Design/soundness notes
+
+- **Raw-pointer hook dispatch (`hooks.rs`)**: `CURRENT_INST` is a `*mut ComponentInst` used via macros (`hooks_ref!`, `hooks_get_mut`, etc.) with `unsafe` blocks justified by "WASM is single-threaded, inst is valid for the render's duration." That's true today, but it's a hard invariant resting entirely on nothing calling back into JS in a way that could re-enter and mutate `hooks` while a `&mut` slot reference from `hooks_get_mut` (which is literally `&'static mut`, an aggressive lifetime cheat) is alive. The reentrant-render handling (`render_generation`) suggests the author is aware of this risk and has thought about it, but this is the single place I'd want the most scrutiny/fuzzing before trusting it in production, since the failure mode of getting it wrong is silent UB, not a panic.
+- **`VNODE_STORE`**: raw `Box::into_raw`/`from_raw` was deliberately avoided in favor of an id-keyed map with idempotent removal — good instinct — but the "leak guard" only *warns* at 10,000 unconsumed entries via console; it doesn't actually reclaim anything. If a JS caller repeatedly constructs vnodes it never passes to render (e.g., a conditional branch that discards a built tree), this grows forever with only a log line to notice it.
+- **`dangerouslySetInnerHTML`** and the general prop-setting path look correctly scoped (opt-in only, not the default path), and text nodes go through `create_text_node`, so ordinary text content isn't an XSS vector.
