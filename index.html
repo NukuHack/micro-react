@@ -26,7 +26,7 @@ window.MicroReact = await import('./micro-react/pkg/micro_react.js')
 // so derive them here once, right after init.
 window.Fragment = MicroReact.getFragment();
 window.ErrorBoundary = MicroReact.createErrorBoundary();
-window.html = (statics, ...values) => MicroReact.htmlTemplate(statics, values);
+window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 
 window.loadJsx = MicroReact.loadJsx;
 window.jsx = MicroReact.jsx;

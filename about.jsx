@@ -26,15 +26,15 @@ export default function AboutPage() {
 
       <div class="code-block">
 <span class="cm">// no build step needed{'\n'}</span>
-<span class="kw">import</span> <span class="fn">initWasm</span>, * <span class="kw">as</span> MicroReact <span class="kw">from</span> <span class="str">'./micro-react.js'</span>;{'\n'}
-<span class="kw">const</span> {'{'} html, useState, render {'}'} = MicroReact;
-<span class="kw">await</span> <span class="fn">initWasm</span>();{'\n'}
+<span class="kw">import</span> <span class="fn">initWasm</span>, * <span class="kw">as</span> MicroReact <span class="kw">from</span> <span class="str">'./micro-react/pkg/micro_react.js'</span>;{'\n'}
+<span class="kw">await</span> <span class="fn">initWasm</span>();
+<span class="kw">const</span> {'{'} htmlTemplate, useState, render {'}'} = MicroReact;
+<span class="fn">window</span>.html = (txt, ...val) {'=>'} MicroReact.<span class="fn">htmlTemplate</span>(<span class="num">txt</span>, <span class="num">val</span>);{'\n'}
 <span class="kw">function</span> <span class="fn">App</span>() {'{'}
 {'  '}<span class="kw">const</span> [n, setN] = useState(<span class="num">0</span>);
 {'  '}<span class="kw">return</span> html<span class="str">`&lt;button onclick="$&#123;() =&gt; setN(n+<span class="num">1</span>)&#125;"&gt;$&#123;n&#125;&lt;/button&gt;`</span>;
 {'}'}{'\n'}
-const __root = render(html<span class="str">`&lt;$&#123;<span class="fn">App</span>&#125; /&gt;`</span>, document.getElementById(<span class="str">'root'</span>));
-<span class="fn">window</span>.__root = __root;
+<span class="fn">window</span>.__root = <span class="kw">await</span> render(html<span class="str">`&lt;$&#123;<span class="fn">App</span>&#125; /&gt;`</span>, document.getElementById(<span class="str">'root'</span>));
       </div>
 
       <div class="feature-grid">
