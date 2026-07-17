@@ -312,7 +312,8 @@ function TabsCard() {
 }
 
 // ─── HOME PAGE ───
-export default function HomePage({ThemeCtx}) {
+export default function HomePage() {
+  const { ThemeCtx } = useOutletContext();
   return (
     <main class="page-enter">
       <div class="hero">

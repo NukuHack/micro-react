@@ -9,7 +9,7 @@
 //! can rarely be misread as a tag start; see `looks_like_jsx_start`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -258,10 +258,106 @@ pub fn transpile_jsx(source: &str) -> Result<JsValue, JsValue> {
 
 thread_local! {
 	static MODULE_CACHE: RefCell<HashMap<String, JsxModuleRecord>> = RefCell::new(HashMap::new());
+
+	/// There's no global `AsyncFunction` binding to grab directly (unlike
+	/// `Function`), so it's derived once via `(async function(){}).constructor`
+	/// and reused for every module — every module body is executed as an
+	/// async function so it can use top-level `await`.
+	static ASYNC_FUNCTION_CTOR: js_sys::Function = {
+		let getter = js_sys::Function::new_no_args("return (async function(){}).constructor;");
+		js_sys::Reflect::apply(&getter, &JsValue::UNDEFINED, &js_sys::Array::new())
+			.ok()
+			.and_then(|v| v.dyn_into::<js_sys::Function>().ok())
+			.expect("AsyncFunction constructor should always be obtainable")
+	};
 }
 struct JsxModuleRecord {
 	exports: JsValue,
 	is_loading: bool,
+}
+
+/// Extensions tried, in order, for an extensionless import specifier —
+/// mirroring the "extension is optional if obvious" resolution real React
+/// tooling (Vite/webpack/Node's resolver) does at build time. We can't do
+/// that statically here since modules are fetched at runtime, so instead we
+/// just probe: request the bare URL, and if that 404s, request each
+/// candidate extension in turn and use the first one that resolves.
+const RESOLVE_EXTENSIONS: [&str; 4] = [".js", ".jsx", ".ts", ".tsx"];
+
+/// True if the URL's final path segment already has a `.ext` (so we should
+/// NOT guess further extensions — e.g. `foo.css?url` or `foo.json`).
+fn path_has_extension(js_url: &web_sys::Url) -> bool {
+	let pathname = js_url.pathname();
+	let last_segment = pathname.rsplit('/').next().unwrap_or("");
+	last_segment.contains('.')
+}
+
+/// Fetches `base_url` as-is; if that 404s and the path looks extensionless,
+/// retries with each of `RESOLVE_EXTENSIONS` appended (query/hash preserved)
+/// until one succeeds. Returns the successful `(Response, url actually
+/// fetched)`, or the original 404 error if every attempt failed.
+async fn fetch_resolving_extension(window: &web_sys::Window, base_url: &str) -> Result<(web_sys::Response, String), JsValue> {
+	let resp_val = JsFuture::from(window.fetch_with_str(base_url)).await?;
+	let resp: web_sys::Response = resp_val.dyn_into()?;
+	if resp.ok() {
+		return Ok((resp, base_url.to_string()));
+	}
+
+	let parsed = web_sys::Url::new(base_url)?;
+	if path_has_extension(&parsed) {
+		return Ok((resp, base_url.to_string()));
+	}
+
+	let pathname = parsed.pathname();
+	let mut last_resp = resp;
+	for ext in RESOLVE_EXTENSIONS {
+		let candidate = web_sys::Url::new(base_url)?;
+		candidate.set_pathname(&format!("{pathname}{ext}"));
+		let candidate_url = candidate.href();
+
+		let resp_val = JsFuture::from(window.fetch_with_str(&candidate_url)).await?;
+		let resp: web_sys::Response = resp_val.dyn_into()?;
+		if resp.ok() {
+			return Ok((resp, candidate_url));
+		}
+		last_resp = resp;
+	}
+
+	Ok((last_resp, base_url.to_string()))
+}
+
+/// True if `url`'s final path segment is a `.css` file (query/hash ignored,
+/// so `./x.css?raw` etc. still counts).
+fn is_css_url(url: &web_sys::Url) -> bool {
+	let pathname = url.pathname();
+	pathname.rsplit('/').next().unwrap_or("").to_ascii_lowercase().ends_with(".css")
+}
+
+thread_local! {
+	static INJECTED_STYLESHEETS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Handles a side-effect stylesheet import (`import './styles.css'`) by
+/// injecting a `<link rel="stylesheet">` into `<head>`, instead of trying to
+/// fetch, transpile, and execute the file as JS. Deduplicated by absolute
+/// URL, so importing the same stylesheet from several modules only adds one
+/// `<link>`. Deliberately doesn't wait for the network fetch to finish —
+/// real bundlers (Vite, webpack) don't block JS module evaluation on CSS
+/// loading either, they just guarantee the tag is in the document.
+fn inject_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue> {
+	let already_injected = INJECTED_STYLESHEETS.with(|set| !set.borrow_mut().insert(href.to_string()));
+	if already_injected {
+		return Ok(());
+	}
+
+	let document = window.document().ok_or_else(|| JsValue::from_str("No document available"))?;
+	let head = document.head().ok_or_else(|| JsValue::from_str("No <head> available"))?;
+
+	let link: web_sys::HtmlLinkElement = document.create_element("link")?.dyn_into()?;
+	link.set_rel("stylesheet");
+	link.set_href(href);
+	head.append_child(&link)?;
+	Ok(())
 }
 
 /// Recursively loads, transpiles, and executes a JSX module in the browser.
@@ -289,11 +385,16 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 		cache.borrow_mut().insert(absolute_url.clone(), JsxModuleRecord { exports: exports.clone().into(), is_loading: true });
 	});
 
-	// 3. Fetch the raw JSX file
-	let resp_val = JsFuture::from(window.fetch_with_str(&absolute_url)).await?;
-	let resp: web_sys::Response = resp_val.dyn_into()?;
+	// 3. Fetch the raw JSX file, guessing an extension if the bare specifier 404s.
+	let (resp, resolved_url) = fetch_resolving_extension(&window, &absolute_url).await?;
 	if !resp.ok() {
-		return Err(JsValue::from_str(&format!("Failed to fetch JSX from '{}': {} {}", absolute_url, resp.status(), resp.status_text())));
+		return Err(JsValue::from_str(&format!(
+			"Failed to fetch JSX from '{}' (also tried {}): {} {}",
+			absolute_url,
+			RESOLVE_EXTENSIONS.iter().map(|e| format!("{absolute_url}{e}")).collect::<Vec<_>>().join(", "),
+			resp.status(),
+			resp.status_text()
+		)));
 	}
 	let src_val = JsFuture::from(resp.text()?).await?;
 	let src = src_val.as_string().unwrap_or_default();
@@ -311,6 +412,35 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 		let named = spec.named.clone();
 
 		let child_url = web_sys::Url::new_with_base(&from, &absolute_url_clone)?.href();
+
+		// CSS specifiers are never JS modules — fetch/transpile/execute
+		// doesn't apply. What to do instead depends entirely on *how* it
+		// was imported, since that's the importer telling us what they
+		// want:
+		//   import './x.css'            → side effect only: inject a
+		//                                  <link rel="stylesheet"> for them.
+		//   import url from './x.css'   → they want the URL (e.g. to build
+		//   import url from './x.css?url'  their own <link>, pass to a
+		//                                  Worker, etc.) — hand back the
+		//                                  resolved URL as `default` and
+		//                                  don't touch the DOM ourselves.
+		if is_css_url(&web_sys::Url::new(&child_url)?) {
+			let is_bare_import = default_name.is_none() && namespace_name.is_none() && named.is_empty();
+			let child_exports = js_sys::Object::new();
+			if is_bare_import {
+				inject_stylesheet(&window, &child_url)?;
+			} else {
+				js_sys::Reflect::set(&child_exports, &"default".into(), &JsValue::from_str(&child_url))?;
+			}
+
+			let result_obj = js_sys::Object::new();
+			js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
+			js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
+			js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
+			js_sys::Reflect::set(&result_obj, &"named".into(), &js_sys::Array::new())?;
+			promises.push(&js_sys::Promise::resolve(&result_obj));
+			continue;
+		}
 
 		let is_circular = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).is_some_and(|rec| rec.is_loading));
 
@@ -389,11 +519,12 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	// 6. Transpile JSX syntax into html`...` calls
 	let js_code = crate::jsx::transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-	// 7. Map arguments and execute via the Function constructor
+	// 7. Map arguments and execute via the AsyncFunction constructor, so the
+	// module body can use top-level `await`.
 	let param_names = js_sys::Object::keys(&imports);
 	let param_values = js_sys::Object::values(&imports);
 
-	let fn_body = format!("{}\nreturn exports;\n//# sourceURL={}", js_code, absolute_url);
+	let fn_body = format!("{}\nreturn exports;\n//# sourceURL={}", js_code, resolved_url);
 
 	let args = js_sys::Array::new();
 	args.push(&"exports".into());
@@ -402,9 +533,7 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	}
 	args.push(&fn_body.into());
 
-	let function_constructor = js_sys::Reflect::get(&js_sys::global(), &"Function".into())?;
-	let func_constructor: js_sys::Function = function_constructor.dyn_into()?;
-	let func: js_sys::Function = js_sys::Reflect::construct(&func_constructor, &args)?.dyn_into()?;
+	let func: js_sys::Function = ASYNC_FUNCTION_CTOR.with(|ctor| js_sys::Reflect::construct(ctor, &args))?.dyn_into()?;
 
 	let call_args = js_sys::Array::new();
 	call_args.push(&exports);
@@ -412,7 +541,12 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 		call_args.push(&val);
 	}
 
-	js_sys::Reflect::apply(&func, &JsValue::UNDEFINED, &call_args)?;
+	// Calling an async function returns a promise immediately; await it so
+	// we (and any module importing this one) don't move on until the whole
+	// body — including anything after a top-level `await` — has actually run.
+	let result = js_sys::Reflect::apply(&func, &JsValue::UNDEFINED, &call_args)?;
+	let promise: js_sys::Promise = result.dyn_into()?;
+	JsFuture::from(promise).await?;
 
 	// Mark loading as complete in our cache
 	MODULE_CACHE.with(|cache| {

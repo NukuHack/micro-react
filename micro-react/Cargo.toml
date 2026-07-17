@@ -17,32 +17,26 @@ wasm-bindgen-futures = "0.4"
 [dependencies.web-sys]
 version = "0.3"
 features = [
-  # Core DOM
-  "Window", "Document", "Element", "HtmlElement", "Node", "NodeList",
-  "Text", "Comment", "DocumentFragment", "ShadowRoot", "HtmlCollection",
-  # Events
-  "Event", "EventTarget", "MouseEvent", "KeyboardEvent", "InputEvent",
-  "FocusEvent", "PointerEvent", "TouchEvent", "WheelEvent",
-  "AnimationEvent", "TransitionEvent", "DragEvent", "ClipboardEvent",
-  # Form elements
-  "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement",
-  "HtmlProgressElement", "HtmlTemplateElement",
-  # Style / CSS
-  "CssStyleDeclaration",
-  # Parser
-  "DomParser", "SupportedType",
-  # Attr
-  "Attr", "NamedNodeMap",
-  # History / Location
-  "Location", "History",
-  # URL & Web
-  "Url", "UrlSearchParams", "Response",
-  # Timers
-  "Performance",
-  # MutationObserver
-  "MutationObserver", "MutationObserverInit", "MutationRecord",
-  # Logging
   "console",
+  "Attr", "AnimationEvent",
+  "ClipboardEvent", "Comment", "CssStyleDeclaration",
+  "Document", "DocumentFragment", "DomParser", "DragEvent",
+  "Element", "Event", "EventTarget",
+  "FocusEvent",
+  "History", "HtmlCollection", "HtmlElement", "HtmlHeadElement",
+  "HtmlInputElement", "HtmlLinkElement", "HtmlProgressElement",
+  "HtmlSelectElement", "HtmlTemplateElement", "HtmlTextAreaElement",
+  "InputEvent",
+  "KeyboardEvent",
+  "Location",
+  "MouseEvent", "MutationObserver", "MutationObserverInit", "MutationRecord",
+  "NamedNodeMap", "Node", "NodeList",
+  "Performance", "PointerEvent",
+  "Response",
+  "ShadowRoot", "SupportedType",
+  "Text", "TouchEvent", "TransitionEvent",
+  "Url", "UrlSearchParams",
+  "WheelEvent", "Window",
 ]
 
 [dev-dependencies]

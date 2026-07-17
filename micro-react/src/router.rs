@@ -9,7 +9,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::bindings::{js_to_vnode, vnode_to_js};
 use crate::context::Context;
-use crate::hooks::{use_effect_nodrop, use_memo, use_state};
+use crate::hooks::{DepVal, use_effect_nodrop, use_memo, use_state};
 use crate::vnode::{PropVal, VNode, VNodeInner};
 
 // ─── Pattern matching ───
@@ -114,7 +114,7 @@ pub fn js_router(props: JsValue) -> JsValue {
 	let routes_obj = Reflect::get(&props, &"routes".into()).unwrap_or(JsValue::NULL);
 
 	let (initial_path, initial_search) = current_location();
-	let (path, set_path) = use_state::<String>(initial_path);
+	let (pathname, set_path) = use_state::<String>(initial_path);
 	let (search, set_search) = use_state::<String>(initial_search);
 
 	{
@@ -150,7 +150,7 @@ pub fn js_router(props: JsValue) -> JsValue {
 		for key in Object::keys(obj).iter() {
 			let pattern_str = key.as_string().unwrap_or_default();
 			let pattern = Pattern::compile(&pattern_str);
-			if let Some(p) = pattern.matches(&path)
+			if let Some(p) = pattern.matches(&pathname)
 				&& let Ok(val) = Reflect::get(&routes_obj, &key)
 				&& val.is_function()
 			{
@@ -161,9 +161,9 @@ pub fn js_router(props: JsValue) -> JsValue {
 		}
 	}
 
-	// Publish { path, search, params } to the location context.
+	// Publish { pathname, search, params } to the location context.
 	let loc_obj = Object::new();
-	let _ = Reflect::set(&loc_obj, &"path".into(), &JsValue::from_str(&path));
+	let _ = Reflect::set(&loc_obj, &"pathname".into(), &JsValue::from_str(&pathname));
 	let _ = Reflect::set(&loc_obj, &"search".into(), &JsValue::from_str(&search));
 	let params_obj = Object::new();
 	for (k, v) in &params {
@@ -230,7 +230,7 @@ pub fn js_link(props: JsValue) -> JsValue {
 	vnode_to_js(builder.build()).unwrap_or(JsValue::NULL)
 }
 
-/// `useLocation()` — returns the current `{ path, search, params }`.
+/// `useLocation()` — returns the current `{ pathname, search, params }`.
 #[wasm_bindgen(js_name = useLocation)]
 pub fn js_use_location() -> JsValue {
 	ROUTER_CTX.with(crate::context::use_context)
@@ -274,6 +274,10 @@ thread_local! {
 	/// rendering here is single-threaded and synchronous, a plain FIFO is
 	/// enough to hand each nested layout the right content.
 	static OUTLET_QUEUE: RefCell<VecDeque<JsValue>> = const { RefCell::new(VecDeque::new()) };
+
+	/// Value passed via `<Outlet context={...} />`, exposed to descendants
+	/// of the outlet's rendered content through `useOutletContext()`.
+	static OUTLET_CTX: Context<JsValue> = Context::new(JsValue::NULL);
 }
 
 /// One flattened leaf route: a URL pattern plus the chain of layout
@@ -329,6 +333,44 @@ fn fresh_instance(vnode: &VNode) -> VNode {
 	v
 }
 
+/// `<Navigate to="/" replace />` — declarative redirect. Performs the
+/// navigation as an effect (once per mount, or again if `to`/`replace`
+/// change) and renders nothing. `replace` swaps in the new entry via
+/// `history.replaceState` instead of `pushState`, so the redirect doesn't
+/// leave the page it redirected away from in the back-button history —
+/// important for guarded/redirect routes.
+#[wasm_bindgen(js_name = Navigate)]
+pub fn js_navigate(props: JsValue) -> JsValue {
+	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+	let replace = Reflect::get(&props, &"replace".into()).ok().map(|v| v.is_truthy()).unwrap_or(false);
+
+	use_effect_nodrop(
+		{
+			let to = to.clone();
+			move || {
+				let Some(window) = web_sys::window() else {
+					crate::console_warn!("[micro-react] Navigate: no window available, navigation ignored");
+					return;
+				};
+				let Ok(history) = window.history() else {
+					crate::console_warn!("[micro-react] Navigate: no history available, navigation ignored");
+					return;
+				};
+				let result = if replace {
+					history.replace_state_with_url(&JsValue::NULL, "", Some(&to))
+				} else {
+					history.push_state_with_url(&JsValue::NULL, "", Some(&to))
+				};
+				let _ = result;
+				window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
+			}
+		},
+		Some(vec![DepVal(to), DepVal(replace.to_string())]),
+	);
+
+	vnode_to_js(VNode::null()).unwrap_or(JsValue::NULL)
+}
+
 /// `<Route path="..." element={...}>...</Route>` — a config-only marker
 /// read directly by `<Routes>` (via its raw, uninvoked vnode) before
 /// anything is rendered. Rendered standalone, outside `<Routes>`, it just
@@ -338,12 +380,22 @@ pub fn js_route(props: JsValue) -> JsValue {
 	Reflect::get(&props, &"element".into()).unwrap_or(JsValue::NULL)
 }
 
-/// `<Outlet />` — renders whichever nested route matched, in place, inside
-/// a layout route's `element`. Only meaningful inside a route rendered by
-/// `<Routes>`.
+/// `<Outlet context={{ a, b, c }} />` — renders whichever nested route
+/// matched, in place, inside a layout route's `element`. Only meaningful
+/// inside a route rendered by `<Routes>`. The optional `context` prop is
+/// published for the rendered subtree to read via `useOutletContext()`.
 #[wasm_bindgen(js_name = Outlet)]
-pub fn js_outlet() -> JsValue {
+pub fn js_outlet(props: JsValue) -> JsValue {
+	let context = Reflect::get(&props, &"context".into()).unwrap_or(JsValue::UNDEFINED);
+	OUTLET_CTX.with(|ctx| ctx.set_value(context));
 	OUTLET_QUEUE.with(|q| q.borrow_mut().pop_front()).unwrap_or(JsValue::NULL)
+}
+
+/// `useOutletContext()` — reads the `context` value passed to the nearest
+/// ancestor `<Outlet context={...} />`, or `undefined` if none was passed.
+#[wasm_bindgen(js_name = useOutletContext)]
+pub fn js_use_outlet_context() -> JsValue {
+	OUTLET_CTX.with(crate::context::use_context)
 }
 
 /// `<Routes><Route path="..." element={...} />...</Routes>` — flattens the

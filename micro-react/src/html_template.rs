@@ -414,6 +414,12 @@ enum ChildTemplate {
 	/// vnode, an array/fragment, a string/number, or null — matching JSX
 	/// child semantics. This is what makes `${list.map(...)}` work.
 	Hole(usize),
+	/// Two or more holes with no separating static text between them
+	/// (`${a}${b}`), which the DOM parser merges into a single text node.
+	/// Each hole is rendered independently via `js_to_vnode`, same as
+	/// `Hole`, rather than being stringified and concatenated — otherwise
+	/// non-string values (vnodes, arrays, components) would be corrupted.
+	HoleSeq(Vec<usize>),
 	Element(Box<ElementTemplate>),
 }
 
@@ -574,6 +580,11 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 				}
 			} else if tt.holes.len() == 1 && tt.literals.iter().all(|l| l.trim().is_empty()) {
 				Some(ChildTemplate::Hole(tt.holes[0]))
+			} else if tt.literals.iter().all(|l| l.trim().is_empty()) {
+				// No static text at all separates the holes (e.g. `${a}${b}`,
+				// as opposed to `${a}, ${b}`) — each hole is an independent
+				// child, not a piece of a concatenated string.
+				Some(ChildTemplate::HoleSeq(tt.holes))
 			} else {
 				Some(ChildTemplate::DynamicText(tt))
 			}
@@ -823,6 +834,16 @@ fn render_child(ct: &ChildTemplate, values: &Array, out: &mut Vec<VNode>) {
 				&& !matches!(vn.inner, VNodeInner::Null)
 			{
 				out.push(vn);
+			}
+		}
+		ChildTemplate::HoleSeq(indices) => {
+			for i in indices {
+				let v = values.get(*i as u32);
+				if let Ok(vn) = js_to_vnode(&v)
+					&& !matches!(vn.inner, VNodeInner::Null)
+				{
+					out.push(vn);
+				}
 			}
 		}
 		ChildTemplate::Element(elem_tpl) => {

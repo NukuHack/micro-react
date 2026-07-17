@@ -3,6 +3,10 @@ use wasm_bindgen::prelude::*;
 /// One `import ... from '...'` line found in the source, with its specifier
 /// shape preserved so a caller can resolve `from` against whatever modules
 /// it already has on hand.
+///
+/// A specifier with `named`, `default_name`, and `namespace_name` all
+/// empty/`None` is a bare, side-effect-only import (`import './x.css';`) —
+/// there's no runtime binding at all, just a request to load `from`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportSpecifier {
 	// Holds pairs of: (local_alias, exported_name)
@@ -16,9 +20,10 @@ fn is_ident_char(c: char) -> bool {
 	c.is_alphanumeric() || c == '_' || c == '$'
 }
 
-/// Matches a single `import {a, b} from '...'` or `import def from '...'`
-/// line in full (leading/trailing whitespace and an optional trailing `;`
-/// allowed, nothing else), returning its specifier if the whole line fits.
+/// Matches a single `import {a, b} from '...'`, `import def from '...'`, or
+/// bare `import '...'` line in full (leading/trailing whitespace and an
+/// optional trailing `;` allowed, nothing else), returning its specifier if
+/// the whole line fits.
 pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 	let trimmed = line.trim();
 	if !trimmed.starts_with("import") {
@@ -37,6 +42,25 @@ pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 	let mut named = Vec::new();
 
 	let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+
+	// Side-effect-only import (`import './x.css';`): no bindings and no
+	// `from` keyword at all, just a bare specifier string. Must be checked
+	// before the default-import branch below, which would otherwise see
+	// the leading quote, find zero identifier characters, and bail out
+	// with `None` — leaving the (illegal, once run through `new
+	// Function`) `import` statement untouched in the transpiled code.
+	if rest.starts_with('\'') || rest.starts_with('"') {
+		let quote = rest.chars().next()?;
+		let after_quote = &rest[1..];
+		let close_quote_idx = after_quote.find(quote)?;
+		let from = after_quote[..close_quote_idx].to_string();
+		let trailing = after_quote[close_quote_idx + 1..].trim();
+		let trailing = trailing.strip_prefix(';').unwrap_or(trailing).trim();
+		if !trailing.is_empty() {
+			return None;
+		}
+		return Some(ImportSpecifier { named: Vec::new(), default_name: None, namespace_name: None, from });
+	}
 
 	// TS type-only imports (`import type { Foo } from '...'` / `import
 	// type Foo from '...'`) carry no runtime binding at all. Without this
@@ -345,4 +369,36 @@ pub fn prepare_module(source: &str) -> Result<JsValue, JsValue> {
 	js_sys::Reflect::set(&out, &"code".into(), &JsValue::from_str(&code))?;
 	js_sys::Reflect::set(&out, &"specifiers".into(), &specifiers_arr)?;
 	Ok(out.into())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parses_bare_side_effect_import() {
+		let spec = parse_import_line("import './css/main.css';").expect("should parse");
+		assert_eq!(spec.from, "./css/main.css");
+		assert!(spec.default_name.is_none());
+		assert!(spec.namespace_name.is_none());
+		assert!(spec.named.is_empty());
+	}
+
+	#[test]
+	fn parses_bare_side_effect_import_no_semicolon() {
+		let spec = parse_import_line("import '../css/list.css'").expect("should parse");
+		assert_eq!(spec.from, "../css/list.css");
+	}
+
+	#[test]
+	fn parses_default_url_import_with_query() {
+		let spec = parse_import_line("import listCssUrl from '../css/list.css?url'").expect("should parse");
+		assert_eq!(spec.from, "../css/list.css?url");
+		assert_eq!(spec.default_name.as_deref(), Some("listCssUrl"));
+	}
+
+	#[test]
+	fn bare_import_rejects_trailing_garbage() {
+		assert!(parse_import_line("import './x.css' extra").is_none());
+	}
 }

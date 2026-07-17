@@ -39,7 +39,7 @@ pub(crate) fn skip_html_doctype(chars: &[char], i: usize) -> Option<usize> {
 pub fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
 	let n = chars.len();
 	let mut j = start;
-	while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':')) {
+	while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':' | '.')) {
 		j += 1;
 	}
 	j
@@ -226,5 +226,16 @@ mod tests {
 	fn find_matching_brace_none_when_unterminated() {
 		let chars: Vec<char> = "{ still open".chars().collect();
 		assert_eq!(find_matching_brace(&chars, 0), None);
+	}
+}
+
+#[cfg(test)]
+mod dotted_name_tests {
+	use super::*;
+
+	#[test]
+	fn scan_tag_name_end_includes_dots() {
+		let chars: Vec<char> = "Context.Provider>".chars().collect();
+		assert_eq!(scan_tag_name_end(&chars, 0), 16);
 	}
 }

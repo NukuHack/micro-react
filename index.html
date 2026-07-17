@@ -28,12 +28,12 @@ window.Fragment = MicroReact.getFragment();
 window.ErrorBoundary = MicroReact.createErrorBoundary();
 window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 
+// Make everything available globally
+Object.assign(window, MicroReact);
+window.ejsx = (txt) => eval(jsx(txt));
+/*
 window.loadJsx = MicroReact.loadJsx;
 window.jsx = MicroReact.jsx;
-window.ejsx = (txt) => eval(jsx(txt));
-
-// Make everything available globally
-// Object.assign(window, MicroReact);
 window.useState = MicroReact.useState;
 window.useReducer = MicroReact.useReducer;
 window.useEffect = MicroReact.useEffect;
@@ -49,16 +49,18 @@ window.Router = MicroReact.Router;
 window.Link = MicroReact.Link;
 window.Route = MicroReact.Route;
 window.Outlet = MicroReact.Outlet;
+window.useOutletContext = MicroReact.useOutletContext;
 window.Routes = MicroReact.Routes;
 window.useLocation = MicroReact.useLocation;
 window.useNavigate = MicroReact.useNavigate;
 window.render = MicroReact.render;
+*/
 
 
 
 // ─── NAV ───
 function Nav() {
-  const { path } = useLocation();
+  const { pathname: path } = useLocation();
   return html`
     <nav>
       <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
@@ -70,13 +72,13 @@ function Nav() {
 }
 
 // ─── SHELL ───
-function Shell({ Page, isNew = false }) {
+function Shell() {
   const {theme, setTheme} = useContext(ThemeCtx);
   
   return html`
     <${Fragment}>
       <${Nav} />
-      <${isNew ? Outlet : Page} ThemeCtx=${ThemeCtx}/>
+      <${Outlet} context=${{ThemeCtx}}/>
       <div style="position:fixed;bottom:1.25rem;right:1.25rem;display:flex;gap:.4rem;z-index:999;background:var(--surface);border:1px solid var(--border);padding:.4rem;border-radius:10px">
         ${themes.map((t, i) => html`
           <button key="${t.name}" class="btn-ghost btn-sm${theme.idx === i ? ' btn-primary' : ''}" onclick="${() => setTheme(i)}" title="${t.label}">${t.label.split(' ')[0]}</button>
@@ -99,18 +101,16 @@ function App() {
   const [theme, _setTheme] = useState(themes[0]);
   const setTheme = (inp) => _setTheme(themes[inp % themes.length]);
 
-  const routes = {
+  let OldJs = html`<${Router} routes="${{
     '/':      () => html`<${Shell} Page=${HomePage} />`,
     '/about': () => html`<${Shell} Page=${AboutPage} />`,
     '/hello': () => html`<${Shell} Page=${HelloPage} />`,
     '*': () => html`<${Shell} Page=${NotFound} />`,
-  };
-
-  let OldJs = html`<${Router} routes="${routes}" />`;
+  }}" />`;
 
   let NewJsx = html`
   <${Routes}>
-    <${Route} path="/" element=${html`<${Shell} isNew=${true} />`}>
+    <${Route} path="/" element=${html`<${Shell} />`}>
       <${Route} index element=${html`<${HomePage} />`} />
       <${Route} path="/about" element=${html`<${AboutPage} />`} />
       <${Route} path="/hello" element=${html`<${HelloPage} />`} />
