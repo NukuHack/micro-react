@@ -936,7 +936,8 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 						}
 					}),
 					props,
-				);
+				)
+				.with_children(child_vnodes);
 				return Some(vn.with_key(key));
 			}
 

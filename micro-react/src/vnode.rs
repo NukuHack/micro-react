@@ -146,6 +146,10 @@ pub enum VNodeInner {
 		name: String,
 		render: ComponentFn,
 		props: Props,
+		/// Raw JSX children, kept alongside (not only inside) `render`'s
+		/// closure so callers like `Routes` can walk a component tree
+		/// (e.g. nested `<Route>`s) without invoking any component function.
+		children: Vec<VNode>,
 		key: Key,
 		/// Holds the live `ComponentInst` once mounted, so the next render
 		/// can reuse it and let hooks survive across re-renders.
@@ -200,7 +204,18 @@ impl VNode {
 	}
 
 	pub fn component(name: impl Into<String>, render: ComponentFn, props: Props) -> Self {
-		VNode::new(VNodeInner::Component { name: name.into(), render, props, key: None, inst: ComponentInstSlot::new() })
+		VNode::new(VNodeInner::Component { name: name.into(), render, props, children: Vec::new(), key: None, inst: ComponentInstSlot::new() })
+	}
+
+	/// Attaches raw JSX children to a `Component` vnode after construction
+	/// (mirrors `with_key`). Used by `createElement`/`html!` so callers like
+	/// `Routes` can walk a component tree (e.g. nested `<Route>`s) without
+	/// invoking any component function.
+	pub fn with_children(mut self, children: Vec<VNode>) -> Self {
+		if let VNodeInner::Component { children: c, .. } = &mut self.inner {
+			*c = children;
+		}
+		self
 	}
 
 	/// Set this vnode's key after construction. Needed for `Component`

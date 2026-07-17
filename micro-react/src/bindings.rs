@@ -240,12 +240,13 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 		let fn_: Function = type_.clone().dyn_into().expect("type_.is_function() checked above");
 		let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
 
+		let children_for_fn = child_vnodes.clone();
 		VNode::component(
 			fn_name,
 			ComponentFn::new(move |props| {
 				let js_props = props_to_js_object(&props);
-				if !child_vnodes.is_empty() {
-					let children_val = children_to_js(&child_vnodes);
+				if !children_for_fn.is_empty() {
+					let children_val = children_to_js(&children_for_fn);
 					let _ = Reflect::set(&js_props, &"children".into(), &children_val);
 				}
 				match fn_.call1(&JsValue::NULL, &js_props) {
@@ -258,6 +259,7 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 			}),
 			rust_props,
 		)
+		.with_children(child_vnodes)
 		.with_key(key)
 	} else {
 		VNode::null()

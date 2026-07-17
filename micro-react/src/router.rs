@@ -2,15 +2,15 @@
 //! Routes are matched by path pattern (":param" segments, "*" catch-all)
 //! against the browser's current location.
 
-use js_sys::{Function, Object, Reflect};
+use js_sys::{Array, Function, Object, Reflect};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::bindings::{js_to_vnode, vnode_to_js};
 use crate::context::Context;
 use crate::hooks::{use_effect_nodrop, use_memo, use_state};
-use crate::vnode::{VNode, VNodeInner};
+use crate::vnode::{PropVal, VNode, VNodeInner};
 
 // ─── Pattern matching ───
 
@@ -259,4 +259,185 @@ pub fn js_use_navigate() -> JsValue {
 		},
 		Some(Vec::new()),
 	)
+}
+
+// ─── Routes / Route / Outlet ───
+// A react-router-style layer on top of `Router` above: `<Routes>` flattens
+// its `<Route>` tree (including nested "layout route" `<Route>`s rendered
+// via `<Outlet/>`) into the same `{ pattern: () => vnode }` table `Router`
+// already matches against, and simply delegates to it.
+
+thread_local! {
+	/// Content queued for the next `<Outlet/>` encountered while a matched
+	/// route tree renders. Populated once per match by `RouteEntry::render`
+	/// and consumed front-to-back as the tree is walked depth-first; since
+	/// rendering here is single-threaded and synchronous, a plain FIFO is
+	/// enough to hand each nested layout the right content.
+	static OUTLET_QUEUE: RefCell<VecDeque<JsValue>> = const { RefCell::new(VecDeque::new()) };
+}
+
+/// One flattened leaf route: a URL pattern plus the chain of layout
+/// elements (outermost first) that wrap the matched leaf element.
+struct RouteEntry {
+	pattern: String,
+	ancestors: Vec<VNode>,
+	leaf: VNode,
+}
+
+impl RouteEntry {
+	fn render(&self) -> JsValue {
+		if self.ancestors.is_empty() {
+			return vnode_to_js(fresh_instance(&self.leaf)).unwrap_or(JsValue::NULL);
+		}
+		let mut queue: VecDeque<JsValue> = self.ancestors[1..].iter().map(|v| vnode_to_js(fresh_instance(v)).unwrap_or(JsValue::NULL)).collect();
+		queue.push_back(vnode_to_js(fresh_instance(&self.leaf)).unwrap_or(JsValue::NULL));
+		OUTLET_QUEUE.with(|q| *q.borrow_mut() = queue);
+		vnode_to_js(fresh_instance(&self.ancestors[0])).unwrap_or(JsValue::NULL)
+	}
+}
+
+/// Deep-clones a stored route template into a vnode with its own,
+/// independent component identity.
+///
+/// `RouteEntry`'s `ancestors`/`leaf` are parsed once and reused for every
+/// activation of that route. A plain `VNode::clone()` only copies the `Rc`
+/// inside `Component`'s `ComponentInstSlot` (see `vnode.rs`), so every clone
+/// taken from the same stored template — across every past and future
+/// activation, and across every `RouteEntry` that shares an ancestor (e.g.
+/// several leaves nested under the same layout `<Route>`) — would alias the
+/// exact same mutable slot. `diff_component`/`unmount_vnode` write and clear
+/// that slot as instances mount/unmount, so without this, one route's mount
+/// or unmount can silently clobber another's live component instance,
+/// eventually handing the reconciler a stale `_dom` reference and producing
+/// an `insertBefore` failure. Giving each clone its own fresh slot keeps
+/// every activation's component identity independent, as intended.
+fn fresh_instance(vnode: &VNode) -> VNode {
+	let mut v = vnode.clone();
+	match &mut v.inner {
+		VNodeInner::Component { inst, children, .. } => {
+			*inst = crate::vnode::ComponentInstSlot::new();
+			*children = children.iter().map(fresh_instance).collect();
+		}
+		VNodeInner::Element { children, .. } => {
+			children.0 = children.0.iter().map(fresh_instance).collect();
+		}
+		VNodeInner::Fragment { children, .. } | VNodeInner::Portal { children, .. } => {
+			children.0 = children.0.iter().map(fresh_instance).collect();
+		}
+		VNodeInner::Text(_) | VNodeInner::Null => {}
+	}
+	v
+}
+
+/// `<Route path="..." element={...}>...</Route>` — a config-only marker
+/// read directly by `<Routes>` (via its raw, uninvoked vnode) before
+/// anything is rendered. Rendered standalone, outside `<Routes>`, it just
+/// falls back to rendering its own `element`.
+#[wasm_bindgen(js_name = Route)]
+pub fn js_route(props: JsValue) -> JsValue {
+	Reflect::get(&props, &"element".into()).unwrap_or(JsValue::NULL)
+}
+
+/// `<Outlet />` — renders whichever nested route matched, in place, inside
+/// a layout route's `element`. Only meaningful inside a route rendered by
+/// `<Routes>`.
+#[wasm_bindgen(js_name = Outlet)]
+pub fn js_outlet() -> JsValue {
+	OUTLET_QUEUE.with(|q| q.borrow_mut().pop_front()).unwrap_or(JsValue::NULL)
+}
+
+/// `<Routes><Route path="..." element={...} />...</Routes>` — flattens the
+/// `<Route>` tree into the flat `routes` table `Router` expects and
+/// delegates to it, so nested/react-router-style JSX compiles down to
+/// exactly the same matching engine as the original flat `routes` object.
+#[wasm_bindgen(js_name = Routes)]
+pub fn js_routes(props: JsValue) -> Result<JsValue, JsValue> {
+	let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
+
+	// Built once per `<Routes>` instance (like useNavigate's Closure above):
+	// JSX `element={<X/>}` evaluates eagerly into a one-shot vnode handle,
+	// so it's pulled out of the JS<->wasm bridge exactly once here (see
+	// js_to_vnode's consume-once semantics) and turned into per-pattern
+	// thunks that are memoized instead of rebuilt (and leaked) every render.
+	let routes_obj: Object = use_memo(
+		move || {
+			let table = build_route_table(&children);
+			let obj = Object::new();
+			for entry in table {
+				let pattern = entry.pattern.clone();
+				let thunk = Closure::wrap(Box::new(move || -> JsValue { entry.render() }) as Box<dyn Fn() -> JsValue>);
+				let _ = Reflect::set(&obj, &JsValue::from_str(&pattern), thunk.as_ref());
+				thunk.forget();
+			}
+			obj
+		},
+		Some(Vec::new()),
+	);
+
+	let router_props = Object::new();
+	Reflect::set(&router_props, &"routes".into(), &routes_obj)?;
+	Ok(js_router(router_props.into()))
+}
+
+fn build_route_table(children: &JsValue) -> Vec<RouteEntry> {
+	let mut out = Vec::new();
+	collect_routes(&js_children_to_vnodes(children), "", &[], &mut out);
+	out
+}
+
+/// Normalizes a JSX `children` prop (single vnode, array, or null/undefined)
+/// into owned `VNode`s — the same rule `createElement` itself applies.
+fn js_children_to_vnodes(children: &JsValue) -> Vec<VNode> {
+	let arr: Array = match children.clone().dyn_into::<Array>() {
+		Ok(a) => a,
+		Err(orig) if orig.is_null() || orig.is_undefined() => Array::new(),
+		Err(orig) => {
+			let a = Array::new();
+			a.push(&orig);
+			a
+		}
+	};
+	arr.iter().filter_map(|c| js_to_vnode(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect()
+}
+
+/// Recursively walks `<Route>` vnodes, joining `path`s and threading
+/// `element`s as ancestor "layout" wrappers for any nested `<Route>`s,
+/// pushing one `RouteEntry` per leaf (childless) `<Route>`.
+fn collect_routes(nodes: &[VNode], parent_path: &str, ancestors: &[VNode], out: &mut Vec<RouteEntry>) {
+	for node in nodes {
+		let VNodeInner::Component { name, props, children, .. } = &node.inner else { continue };
+		if name.as_str() != "Route" {
+			continue;
+		}
+
+		let mut path: Option<String> = None;
+		let mut element: Option<VNode> = None;
+		for (k, v) in props {
+			match (k.as_str(), v) {
+				("path", PropVal::Str(s)) => path = Some(s.clone()),
+				("element", PropVal::Js(js)) => element = js_to_vnode(js).ok(),
+				_ => {}
+			}
+		}
+
+		let full_path = match &path {
+			Some(p) => join_path(parent_path, p),
+			None => parent_path.to_string(),
+		};
+
+		if children.is_empty() {
+			let Some(leaf) = element else { continue };
+			out.push(RouteEntry { pattern: if full_path.is_empty() { "/".to_string() } else { full_path }, ancestors: ancestors.to_vec(), leaf });
+		} else {
+			let mut next_ancestors = ancestors.to_vec();
+			if let Some(el) = element {
+				next_ancestors.push(el);
+			}
+			collect_routes(children, &full_path, &next_ancestors, out);
+		}
+	}
+}
+
+fn join_path(parent: &str, child: &str) -> String {
+	format!("{}/{}", parent.trim_end_matches('/'), child.trim_start_matches('/'))
 }

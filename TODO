@@ -3,7 +3,7 @@ fix what you can when done remove it from the TODO , if something is too complex
 read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
-none (afaik)
+Outlet does not pass it's props, to the inner stuff
 
 ## Design/soundness notes
 
@@ -13,4 +13,11 @@ none (afaik)
 
 ## Test coverage gaps
 
-none (afaik)
+Router and stuff
+Vnode's inner stuff
+
+
+
+## Plans for extension :
+
+<Navigate to="/" replace /> // the replace part is important for redirect !!

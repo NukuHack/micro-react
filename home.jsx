@@ -147,17 +147,20 @@ function TimerCard() {
 
 // ─── THEME DEMO (useContext) ───
 function ThemeCard({ThemeCtx}) {
-  const theme = useContext(ThemeCtx);
+  const {theme, setTheme} = useContext(ThemeCtx);
 
   return (
     <div class="card">
       <span class="hook-pill">createContext · useContext</span>
-      <h3>Theme Context</h3>
-      <p style="font-size:.875rem;color:var(--muted);margin-bottom:.75rem">
-        Theme is set from App root. Consumer reads it anywhere in the tree.
-      </p>
-      <div class={`theme-box theme-${theme.name}`}>
-        Current theme: "{theme.label}" — rendered from context 🎨
+      <div onclick={() => setTheme(theme.idx + 1)}>
+        <h3>Theme Context</h3>
+        <p style="font-size:.875rem;color:var(--muted);margin-bottom:.75rem">
+          Theme is set from App root. Consumer reads it anywhere in the tree.
+          Click to cycle
+        </p>
+        <div class={`theme-box theme-${theme.name}`}>
+          Current theme: "{theme.label}" — rendered from context 🎨
+        </div>
       </div>
     </div>
   );
