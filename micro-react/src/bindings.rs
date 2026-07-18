@@ -34,6 +34,13 @@ thread_local! {
 
 const VNODE_STORE_WARN_THRESHOLD: usize = 10_000;
 
+/// Property name used to tag a `forwardRef`-wrapped render function. See
+/// `js_forward_ref` for why this needs no new element-type kind: the
+/// function is still dispatched through the ordinary `type_.is_function()`
+/// path in `create_element`/`html_template::render_element`, just called
+/// with the caller's `ref` as a second argument when this flag is set.
+pub(crate) const FORWARD_REF_MARKER: &str = "__mrForwardRef";
+
 fn next_vnode_id() -> u64 {
 	VNODE_NEXT_ID.with(|c| {
 		let mut c = c.borrow_mut();
@@ -189,8 +196,11 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 
 	// Extract `ref` and turn it into a NodeRef whose `sync` callback writes
 	// back into the JS ref object (or calls the callback-ref function).
-	let node_ref: Option<NodeRef> =
-		if props.is_object() { Reflect::get(props, &"ref".into()).ok().and_then(|v| js_ref_to_node_ref(&v)) } else { None };
+	// Also keep the raw, unconverted value around: a `forwardRef`-tagged
+	// component wants the caller's actual ref (callback or `{ current }`
+	// object) handed to it as a plain argument, not a NodeRef.
+	let raw_ref: JsValue = if props.is_object() { Reflect::get(props, &"ref".into()).unwrap_or(JsValue::UNDEFINED) } else { JsValue::UNDEFINED };
+	let node_ref: Option<NodeRef> = js_ref_to_node_ref(&raw_ref);
 
 	let mut rust_props: Props = Vec::new();
 	let dummy = js_sys::Object::new();
@@ -239,8 +249,10 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 	} else if type_.is_function() {
 		let fn_: Function = type_.clone().dyn_into().expect("type_.is_function() checked above");
 		let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
+		let is_forward_ref = Reflect::get(&fn_, &FORWARD_REF_MARKER.into()).map(|v| v.is_truthy()).unwrap_or(false);
 
 		let children_for_fn = child_vnodes.clone();
+		let raw_ref_for_fn = raw_ref.clone();
 		VNode::component(
 			fn_name,
 			ComponentFn::new(move |props| {
@@ -249,7 +261,9 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 					let children_val = children_to_js(&children_for_fn);
 					let _ = Reflect::set(&js_props, &"children".into(), &children_val);
 				}
-				match fn_.call1(&JsValue::NULL, &js_props) {
+				let result =
+					if is_forward_ref { fn_.call2(&JsValue::NULL, &js_props, &raw_ref_for_fn) } else { fn_.call1(&JsValue::NULL, &js_props) };
+				match result {
 					Ok(result) => Ok(js_to_vnode(&result).unwrap_or_else(|_| VNode::null())),
 					// A thrown JS exception becomes a plain `Err`, the same path a
 					// Rust component uses to "throw" directly; diff_component /
@@ -557,6 +571,35 @@ pub fn js_memo(component: &Function, compare: JsValue) -> Result<JsValue, JsValu
 	}) as Box<dyn Fn(JsValue) -> JsValue>);
 
 	Ok(wrapper.into_js_value())
+}
+
+// ─── forwardRef() HOC ───
+
+/// `forwardRef(render)` — wraps a `(props, ref) => vnode` render function so
+/// it receives the caller's `ref` as a second argument instead of having it
+/// silently dropped, which is what happens to a `ref` passed to an ordinary
+/// function component (matching React's default behavior there).
+///
+/// Unlike `memo`, this doesn't need a new wrapper closure or element-type
+/// kind: `render` is still just an ordinary function as far as
+/// `create_element`/`html_template::render_element`'s `type_.is_function()`
+/// dispatch is concerned. Tagging it with `FORWARD_REF_MARKER` is enough —
+/// both call sites check the flag and call with `(props, ref)` instead of
+/// `(props)` when it's set, passing through the raw ref value (a callback
+/// or a `{ current }` object) exactly as the caller wrote it, so the
+/// component can attach it to an inner DOM node itself (e.g.
+/// `<input ref={ref} />`), which goes through the normal ref pipeline at
+/// that point.
+///
+/// Note this tags (mutates) `render` in place and returns the same
+/// reference, rather than producing a distinct wrapper object the way React
+/// does — a function is a JS object, so this is enough for our purposes,
+/// but it does mean the exact same function value is "forwardRef-aware"
+/// everywhere it's used, not just via the value `forwardRef()` returns.
+#[wasm_bindgen(js_name = forwardRef)]
+pub fn js_forward_ref(render: &Function) -> Result<JsValue, JsValue> {
+	Reflect::set(render, &FORWARD_REF_MARKER.into(), &JsValue::TRUE)?;
+	Ok(render.clone().into())
 }
 
 fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {

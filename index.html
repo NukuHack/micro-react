@@ -30,7 +30,6 @@ window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 
 // Make everything available globally
 Object.assign(window, MicroReact);
-window.ejsx = (txt) => eval(jsx(txt));
 
 
 
@@ -109,7 +108,7 @@ const [
   loadJsx('./404.jsx'), loadJsx('./about.jsx')
 ]);
 
-window.__root = await render(ejsx(`<App />`), document.getElementById('root'));
+window.__root = await render(html`<${App} />`, document.getElementById('root'));
 </script>
 
 </body>

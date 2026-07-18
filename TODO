@@ -26,9 +26,11 @@ none as far as tested
 - **`scheduler.rs::MAX_FLUSH_ITERATIONS` bailout path** (the "component re-dirties itself forever" guard) is `pub` specifically so tests can assert the exact bailout point per its own doc comment, but no test in `tests/` actually does — `hooks_scheduler.rs` covers normal flush behavior but not the runaway-loop / `schedule_flush_deferred` fallback-to-`setTimeout` path.
 - **`hooks.rs::report_to_nearest_boundary`'s two lookup paths** (`nearest_boundary` on the origin instance vs. falling back to the live `BOUNDARY_STACK`) are both exercised together in the mainline boundary tests, but the specific case the doc comment calls out — a component's *own later, independent* re-render (its own `setState`, not triggered from within the boundary's active diff pass) still finding its ancestor boundary via the persisted field when `BOUNDARY_STACK` is empty — doesn't appear to have its own isolated test.
 
+a lot for the newly added react looking api-s
+
 ## Plans for extension
 
-- **No `forwardRef`-equivalent** — `ref` is only extracted and attached at the DOM-element level (`create_element`'s `node_ref`); there's no mechanism for a function/HOC-wrapped component to forward a `ref` prop through to an inner DOM node the way `React.forwardRef` does. Not fixed here: this needs a real API design decision (a `forwardRef(fn)` wrapper type distinct from a plain component function, threaded through `create_element`/`js_ref_to_node_ref` in `bindings.rs`), not a local patch.
+none for now
 
 ## Design/soundness notes
 

@@ -950,7 +950,11 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 	}
 
 	let key = tpl.key.as_ref().and_then(|k| resolve_key(k, values));
-	let node_ref: Option<NodeRef> = tpl.ref_hole.and_then(|i| js_ref_to_node_ref(&values.get(i as u32)));
+	// Raw, unconverted ref value (needed for `forwardRef`, which wants the
+	// caller's actual ref handed through as an argument) alongside the
+	// NodeRef wrapper (needed for a plain DOM-element `ref`).
+	let raw_ref: JsValue = tpl.ref_hole.map(|i| values.get(i as u32)).unwrap_or(JsValue::UNDEFINED);
+	let node_ref: Option<NodeRef> = js_ref_to_node_ref(&raw_ref);
 
 	match &tpl.tag {
 		TagSource::Static(tag) => {
@@ -997,6 +1001,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 			if type_val.is_function() {
 				let fn_: js_sys::Function = type_val.clone().unchecked_into();
 				let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
+				let is_forward_ref = Reflect::get(&fn_, &crate::bindings::FORWARD_REF_MARKER.into()).map(|v| v.is_truthy()).unwrap_or(false);
 
 				let mut props: Props = Vec::new();
 				for entry in &tpl.attrs {
@@ -1010,6 +1015,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 				}
 
 				let children_for_fn = child_vnodes.clone();
+				let raw_ref_for_fn = raw_ref.clone();
 				let vn = VNode::component(
 					fn_name,
 					ComponentFn::new(move |comp_props| {
@@ -1018,7 +1024,9 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 							let children_val = children_to_js(&children_for_fn);
 							let _ = Reflect::set(&js_props, &"children".into(), &children_val);
 						}
-						match fn_.call1(&JsValue::NULL, &js_props) {
+						let result =
+							if is_forward_ref { fn_.call2(&JsValue::NULL, &js_props, &raw_ref_for_fn) } else { fn_.call1(&JsValue::NULL, &js_props) };
+						match result {
 							Ok(result) => Ok(js_to_vnode(&result).unwrap_or_else(|_| VNode::null())),
 							// See bindings.rs's identical component wrapper: propagate
 							// as Err and let diff.rs walk up to the nearest boundary.
