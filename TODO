@@ -3,17 +3,33 @@ fix what you can when done remove it from the TODO , if something is too complex
 read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
-none (as far as i tested)
+
+none as far as tested
 
 ## Test coverage gaps
 
-Router and stuff
-Vnode's inner stuff
-more extensive jsx+html parsing, the edge cases and such
+`tests/reconciler.rs` says outright in its own header comment: *"This is a starting set covering the specific gaps the review flagged, not a complete suite — there's plenty more surface (portals, refs, router, context) that would benefit from the same treatment."* Below is that promised follow-up, plus a pass over the rest of the suite:
 
-## Plans for extension :
+- **`src/bindings.rs` (894 lines, the entire JS-facing surface) has no dedicated test file at all.** No test imports `micro_react::bindings` directly. Concretely untested:
+  - `create_element` / `createElement`: key coercion for numeric/boolean keys, Fragment-symbol detection, `ref` extraction via `js_ref_to_node_ref`, the variadic-children-array workaround, and the "any non-array child becomes a one-element array" branch.
+  - Every `js_use_*` hook wrapper (`js_use_state`, `js_use_reducer`, `js_use_effect`, `js_use_layout_effect`, `js_use_ref`, `js_use_memo`, `js_use_callback`, `js_use_id`) as called *from JS values* — i.e. the JsValue marshalling layer, not just the underlying Rust hook (which `hooks_scheduler.rs` does cover). In particular: `js_use_state`'s functional-updater path (`setState(prev => next)`) resolving against the live cell rather than a stale snapshot, and `cached_setter`/`SETTER_CACHE` actually caching (same setter identity across re-renders) and evicting on unmount.
+  - `js_create_context`/`js_use_context`: the Provider/Consumer/`useContext` object shape, the `record_create_context_call` leak-count warning firing on the 2nd+ call, and the `js_use_context` error path when handed something without a `useContext` method.
+  - `js_memo`/`shallow_equal`: skip vs. re-render on prop equality, custom `compare` function path, and that a *skipped* render replays the previously-cached vnode via a **fresh** `vnode_to_js` box rather than re-handing out the old one (the comment above `prev_result` flags this as a real double-free risk if gotten wrong — exactly the kind of thing that deserves a regression test, not just a comment).
+  - `js_create_error_boundary`/`js_create_error_boundary_inner`: the re-entrancy guard (`in_progress`) actually blocking a nested synchronous re-entrant call, and `ResetOnDrop` clearing the guard after a panic.
+  - `js_to_vnode`/`vnode_to_js`/`children_to_js`/`js_val_to_prop_val`/`props_to_js_object`: round-tripping every `PropVal` variant, array-as-fragment, and the `__mrVNode`/`__id` marker protocol.
+  - The `VNODE_STORE` leak-guard: nothing asserts that `take_vnode` is idempotent (second call on the same id returns `None`, doesn't panic/double-free) or that the `VNODE_STORE_WARN_THRESHOLD` warning actually fires once and only once.
+- **Portals** (`diff.rs::diff_portal`, `VNodeInner::Portal` in `vnode.rs`) have no test coverage anywhere in `tests/`. Nothing exercises rendering into a foreign container, moving a portal's target container across renders, or unmounting a component whose subtree contains a portal.
+- **Refs** have only `refs_dom.rs` (9 tests) via the Rust-level `NodeRef` API; none of it goes through `bindings::js_ref_to_node_ref`, so the callback-ref vs. object-ref (`{ current }`) branches, and re-syncing a ref when the underlying DOM node is replaced (same slot, different tag), are untested from the JS-facing side.
+- **`router.rs`** (495 lines) has 22 tests but per the `reconciler.rs` note is flagged as under-covered — check in particular: nested routes / relative paths, redirect components, and interaction with `ErrorBoundary` (a route component throwing).
+- **`src/scan.rs`** (`scan_tag_name_end`, `skip_js_string`, `skip_js_comment`, `find_matching_brace`) has no dedicated unit-test file; it's only exercised indirectly through `jsx_test.rs`'s higher-level transpile assertions. Edge cases worth pinning down directly: unterminated strings/comments (should return `None`, not panic or scan past the end), nested braces inside a JS string literal inside a `{}` hole, and block vs. line comments abutting a tag boundary.
+- **`src/render.rs`** (`Root::render`/`Root::unmount`) has no dedicated test file; it's only touched incidentally through `refs_dom.rs` and other DOM tests calling `Root::render` to get a mounted tree, never testing `Root` itself — e.g. re-`render()`-ing on the same root with a changed tree, or `unmount()` correctly tearing down all effect cleanups/hooks for the whole tree (not just a single component, which is what `hooks_scheduler.rs` covers).
+- **`scheduler.rs::MAX_FLUSH_ITERATIONS` bailout path** (the "component re-dirties itself forever" guard) is `pub` specifically so tests can assert the exact bailout point per its own doc comment, but no test in `tests/` actually does — `hooks_scheduler.rs` covers normal flush behavior but not the runaway-loop / `schedule_flush_deferred` fallback-to-`setTimeout` path.
+- **`hooks.rs::report_to_nearest_boundary`'s two lookup paths** (`nearest_boundary` on the origin instance vs. falling back to the live `BOUNDARY_STACK`) are both exercised together in the mainline boundary tests, but the specific case the doc comment calls out — a component's *own later, independent* re-render (its own `setState`, not triggered from within the boundary's active diff pass) still finding its ancestor boundary via the persisted field when `BOUNDARY_STACK` is empty — doesn't appear to have its own isolated test.
 
-none currently
+## Plans for extension : (React parity gaps — things commonly used in React that don't exist here)
+
+- **JSX spread attributes (`<Comp {...props} />`)** aren't supported by the JSX-to-`html_template` transpiler in `jsx.rs`/`html_template.rs` — there's no handling of `...` inside an attribute list anywhere in either file. This is extremely common in ported React code (forwarding props, merging default props with overrides) and any component using it will either fail to transpile or silently drop the spread. Not fixed here: `html_template`'s attribute compilation walks a real, browser-parsed DOM element (`elem.attributes()`), which has no way to represent an unparsed `...expr` attribute at all — supporting this needs a new attribute-hole kind threaded through both `jsx.rs` and `html_template.rs`'s `ElementTemplate`/`props_to_js_object` pipeline, not a local fix.
+- **No `forwardRef`-equivalent** — `ref` is only extracted and attached at the DOM-element level (`create_element`'s `node_ref`); there's no mechanism for a function/HOC-wrapped component to forward a `ref` prop through to an inner DOM node the way `React.forwardRef` does. Not fixed here: this needs a real API design decision (a `forwardRef(fn)` wrapper type distinct from a plain component function, threaded through `create_element`/`js_ref_to_node_ref` in `bindings.rs`), not a local patch.
 
 ## Design/soundness notes
 

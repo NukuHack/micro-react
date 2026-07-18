@@ -26,6 +26,7 @@ features = [
   "History", "HtmlCollection", "HtmlElement", "HtmlHeadElement",
   "HtmlInputElement", "HtmlLinkElement", "HtmlProgressElement",
   "HtmlSelectElement", "HtmlTemplateElement", "HtmlTextAreaElement",
+  "HtmlOptionElement", "HtmlOptionsCollection",
   "InputEvent",
   "KeyboardEvent",
   "Location",

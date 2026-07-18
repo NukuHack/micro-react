@@ -563,6 +563,15 @@ fn attr_value_template(raw: &str) -> AttrValueTemplate {
 	}
 }
 
+/// Whitespace that's purely template-formatting indentation (i.e. contains a
+/// newline) collapses, matching JSX. Whitespace with no newline is a
+/// deliberate same-line separator (`<span>a</span> <span>b</span>`, or
+/// `${a} ${b}`) and must be kept — see the no-holes branch of
+/// `compile_node` below, which this mirrors for the with-holes branches.
+fn is_insignificant_ws(l: &str) -> bool {
+	l.is_empty() || (l.trim().is_empty() && l.contains('\n'))
+}
+
 fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<ChildTemplate> {
 	match node.node_type() {
 		Node::TEXT_NODE => {
@@ -578,12 +587,12 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 				} else {
 					Some(ChildTemplate::StaticText(text))
 				}
-			} else if tt.holes.len() == 1 && tt.literals.iter().all(|l| l.trim().is_empty()) {
+			} else if tt.holes.len() == 1 && tt.literals.iter().all(|l| is_insignificant_ws(l)) {
 				Some(ChildTemplate::Hole(tt.holes[0]))
-			} else if tt.literals.iter().all(|l| l.trim().is_empty()) {
+			} else if tt.literals.iter().all(|l| is_insignificant_ws(l)) {
 				// No static text at all separates the holes (e.g. `${a}${b}`,
-				// as opposed to `${a}, ${b}`) — each hole is an independent
-				// child, not a piece of a concatenated string.
+				// as opposed to `${a}, ${b}` or `${a} ${b}`) — each hole is an
+				// independent child, not a piece of a concatenated string.
 				Some(ChildTemplate::HoleSeq(tt.holes))
 			} else {
 				Some(ChildTemplate::DynamicText(tt))
@@ -1230,6 +1239,125 @@ mod pure_logic_tests {
 		assert!(is_void_element("br"));
 		assert!(!is_void_element("div"));
 		assert!(!is_void_element("mr-slot-0"));
+	}
+
+	// ── hole_token / tag_slot_name / tag_slot_index ──
+
+	#[test]
+	fn hole_token_wraps_index_in_mark_chars() {
+		assert_eq!(hole_token(0), "\u{E000}h0\u{E000}");
+		assert_eq!(hole_token(42), "\u{E000}h42\u{E000}");
+	}
+
+	#[test]
+	fn tag_slot_name_formats_mr_slot() {
+		assert_eq!(tag_slot_name(0), "mr-slot-0");
+		assert_eq!(tag_slot_name(7), "mr-slot-7");
+	}
+
+	#[test]
+	fn tag_slot_index_round_trips_tag_slot_name() {
+		assert_eq!(tag_slot_index(&tag_slot_name(3)), Some(3));
+		assert_eq!(tag_slot_index("mr-slot-12"), Some(12));
+	}
+
+	#[test]
+	fn tag_slot_index_none_for_unrelated_tags() {
+		assert_eq!(tag_slot_index("div"), None);
+		assert_eq!(tag_slot_index("mr-slot-"), None);
+		assert_eq!(tag_slot_index("mr-slot-abc"), None);
+		// A near-miss prefix without the trailing digits shouldn't parse either.
+		assert_eq!(tag_slot_index("mr-slotx-1"), None);
+	}
+
+	// ── split_holes ──
+
+	#[test]
+	fn split_holes_on_plain_text_returns_one_literal_no_holes() {
+		let tt = split_holes("hello world");
+		assert_eq!(tt.literals, vec!["hello world".to_string()]);
+		assert!(tt.holes.is_empty());
+	}
+
+	#[test]
+	fn split_holes_single_hole_only() {
+		let tt = split_holes(&hole_token(5));
+		assert_eq!(tt.literals, vec!["".to_string(), "".to_string()]);
+		assert_eq!(tt.holes, vec![5]);
+	}
+
+	#[test]
+	fn split_holes_mixed_literals_and_holes() {
+		let s = format!("a{}b{}c", hole_token(0), hole_token(1));
+		let tt = split_holes(&s);
+		assert_eq!(tt.literals, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+		assert_eq!(tt.holes, vec![0, 1]);
+	}
+
+	#[test]
+	fn split_holes_invariant_literals_len_is_holes_len_plus_one() {
+		let s = format!("x{}y{}z{}w", hole_token(0), hole_token(1), hole_token(2));
+		let tt = split_holes(&s);
+		assert_eq!(tt.literals.len(), tt.holes.len() + 1);
+	}
+
+	#[test]
+	fn split_holes_malformed_token_is_kept_verbatim() {
+		// An unterminated MARK run (no closing MARK) shouldn't be parsed as a
+		// hole, and shouldn't silently eat the trailing characters either.
+		let s = format!("a{}not-a-real-hole", MARK);
+		let tt = split_holes(&s);
+		assert!(tt.holes.is_empty());
+		assert_eq!(tt.literals, vec![s]);
+	}
+
+	#[test]
+	fn split_holes_non_numeric_mark_pair_is_kept_verbatim() {
+		// Closed MARK...MARK run, but the inner text isn't "h<digits>" —
+		// shouldn't be mistaken for a real hole token.
+		let s = format!("a{}nothex{}b", MARK, MARK);
+		let tt = split_holes(&s);
+		assert!(tt.holes.is_empty());
+		assert_eq!(tt.literals, vec![s]);
+	}
+
+	// ── attr_value_template ──
+
+	#[test]
+	fn attr_value_template_pure_static_string() {
+		match attr_value_template("hello") {
+			AttrValueTemplate::Static(s) => assert_eq!(s, "hello"),
+			other => panic!("expected Static, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn attr_value_template_whole_value_is_one_hole() {
+		let raw = hole_token(2);
+		match attr_value_template(&raw) {
+			AttrValueTemplate::Hole(i) => assert_eq!(i, 2),
+			other => panic!("expected Hole, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn attr_value_template_mixed_literal_and_hole_is_mixed() {
+		let raw = format!("px-{}", hole_token(0));
+		match attr_value_template(&raw) {
+			AttrValueTemplate::Mixed(tt) => {
+				assert_eq!(tt.literals, vec!["px-".to_string(), "".to_string()]);
+				assert_eq!(tt.holes, vec![0]);
+			}
+			other => panic!("expected Mixed, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn attr_value_template_empty_string_is_static() {
+		match attr_value_template("") {
+			AttrValueTemplate::Static(s) => assert_eq!(s, ""),
+			other => panic!("expected Static, got {other:?}"),
+		}
 	}
 }
 

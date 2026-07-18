@@ -85,7 +85,7 @@ impl<T: Clone + 'static> Context<T> {
 
 /// Read the current value of `ctx` and re-render this component when it changes.
 pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
-	use crate::hooks::{DepVal, current_weak, use_effect_nodrop};
+	use crate::hooks::{DepVal, current_weak, use_effect};
 	use crate::scheduler::enqueue_render;
 
 	let value = ctx.current_value();
@@ -98,14 +98,12 @@ pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
 		enqueue_render(weak.clone());
 	});
 
-	// Register the subscription in a useEffect (runs once, cleans up on unmount).
+	// Register the subscription in a useEffect (runs once, cleans up on
+	// unmount/dep-change). `subscribe()`'s returned deregistration closure
+	// is the effect's cleanup, so it actually runs instead of being
+	// dropped immediately — otherwise CTX_LISTENERS grows without bound.
 	let ctx_clone = ctx.clone();
-	use_effect_nodrop(
-		move || {
-			let _unsub = ctx_clone.subscribe(waker);
-		},
-		Some(vec![DepVal(format!("ctx_{}", ctx_id))]),
-	);
+	use_effect(move || ctx_clone.subscribe(waker), Some(vec![DepVal(format!("ctx_{}", ctx_id))]));
 
 	value
 }

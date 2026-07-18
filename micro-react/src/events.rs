@@ -129,8 +129,14 @@ pub fn parse_event_prop(prop: &str) -> Option<(String, bool)> {
 
 	// Convert camelCase to lowercase: "MouseEnter" → "mouseenter"
 	// "DoubleClick" is special-cased to "dblclick" to match the real DOM event name.
+	// "Change" is special-cased to the native "input" event: React's onChange
+	// fires live on every edit (backed by the native "input" event), not just
+	// on blur/commit like the native "change" event does. Without this,
+	// controlled text inputs/textareas ported from React would only update
+	// on blur instead of on every keystroke.
 	let event_name = match rest {
 		"DoubleClick" => "dblclick".to_string(),
+		"Change" => "input".to_string(),
 		_ => rest.to_lowercase(),
 	};
 	Some((event_name, capture))

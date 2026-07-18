@@ -230,6 +230,67 @@ pub fn js_link(props: JsValue) -> JsValue {
 	vnode_to_js(builder.build()).unwrap_or(JsValue::NULL)
 }
 
+/// `NavLink({ to, end, class/className, children })` — a `Link` that knows
+/// whether it's "active" (current location is `to`, or a descendant path of
+/// it unless `end` is set) and reflects that in its class list.
+/// `class`/`className` may be a plain string (appended with a trailing
+/// `" active"` when active) or a function `({ isActive }) => string`,
+/// mirroring React Router's `NavLink`.
+#[wasm_bindgen(js_name = NavLink)]
+pub fn js_nav_link(props: JsValue) -> JsValue {
+	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+	let end = Reflect::get(&props, &"end".into()).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+
+	let location = ROUTER_CTX.with(crate::context::use_context);
+	let pathname = Reflect::get(&location, &"pathname".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+	let trimmed_to = to.trim_end_matches('/');
+	let is_active = if end || trimmed_to.is_empty() {
+		// `end` forces exact match; a root `to="/"` (trimmed_to == "") must
+		// also be exact, since every path starts with "/" and would
+		// otherwise always match as a "descendant" of it.
+		pathname == to
+	} else {
+		pathname == to || pathname.starts_with(&format!("{trimmed_to}/"))
+	};
+
+	let class_prop =
+		Reflect::get(&props, &"class".into()).ok().filter(|v| !v.is_undefined()).or_else(|| Reflect::get(&props, &"className".into()).ok());
+
+	let class_name = match class_prop {
+		Some(f) if f.is_function() => {
+			let arg = Object::new();
+			let _ = Reflect::set(&arg, &"isActive".into(), &JsValue::from_bool(is_active));
+			f.unchecked_ref::<Function>().call1(&JsValue::NULL, &arg).ok().and_then(|v| v.as_string()).unwrap_or_default()
+		}
+		Some(v) => {
+			let base = v.as_string().unwrap_or_default();
+			match (base.is_empty(), is_active) {
+				(true, true) => "active".to_string(),
+				(true, false) => String::new(),
+				(false, true) => format!("{base} active"),
+				(false, false) => base,
+			}
+		}
+		None => {
+			if is_active {
+				"active".to_string()
+			} else {
+				String::new()
+			}
+		}
+	};
+
+	// Delegate the actual anchor/click-navigation building to Link, then
+	// swap in the computed class so the two stay in sync with each other.
+	let link_props = Object::new();
+	let _ = Reflect::set(&link_props, &"to".into(), &JsValue::from_str(&to));
+	let _ = Reflect::set(&link_props, &"className".into(), &JsValue::from_str(&class_name));
+	if let Ok(children) = Reflect::get(&props, &"children".into()) {
+		let _ = Reflect::set(&link_props, &"children".into(), &children);
+	}
+	js_link(link_props.into())
+}
+
 /// `useLocation()` — returns the current `{ pathname, search, params }`.
 #[wasm_bindgen(js_name = useLocation)]
 pub fn js_use_location() -> JsValue {

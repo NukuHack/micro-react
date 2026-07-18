@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::Element;
 
 use crate::context::use_context;
-use crate::hooks::{DepVal, current_inst, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state, use_state_cell};
+use crate::hooks::{DepVal, current_inst, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell};
 use crate::render::Root;
 use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode, VNodeInner};
 
@@ -394,26 +394,19 @@ pub fn js_use_layout_effect(callback: &Function, deps: JsValue) {
 }
 
 /// `useRef(initialValue?)` — returns a `{ current: value }` JS object,
-/// stable across renders.
+/// stable across renders. Backed by `use_ref_cell`, a plain hook slot that
+/// never touches the scheduler, so (unlike a `useState`-based
+/// implementation) calling this never triggers an extra re-render.
 #[wasm_bindgen(js_name = useRef)]
 pub fn js_use_ref(initial: JsValue) -> Object {
-	let (initialized, set_init) = use_state::<bool>(false);
-	let (ref_obj, set_ref) = use_state::<JsValue>(JsValue::NULL);
-
-	if !initialized {
+	let cell = crate::hooks::use_ref_cell(|| {
 		let obj = Object::new();
 		Reflect::set(&obj, &"current".into(), &initial).expect("setting a plain-object property cannot fail");
-		let obj_val: JsValue = obj.clone().into();
-		set_init(true);
-		set_ref(obj_val);
-		return obj;
-	}
+		let obj_val: JsValue = obj.into();
+		obj_val
+	});
 
-	ref_obj.dyn_into::<Object>().unwrap_or_else(|_| {
-		let obj = Object::new();
-		Reflect::set(&obj, &"current".into(), &initial).expect("setting a plain-object property cannot fail");
-		obj
-	})
+	cell.borrow().downcast_ref::<JsValue>().cloned().unwrap_or(JsValue::UNDEFINED).dyn_into::<Object>().unwrap_or_else(|_| Object::new())
 }
 
 /// `useMemo(factory, deps)` — returns a memoised value.

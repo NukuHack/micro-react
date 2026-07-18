@@ -31,42 +31,17 @@ window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 // Make everything available globally
 Object.assign(window, MicroReact);
 window.ejsx = (txt) => eval(jsx(txt));
-/*
-window.loadJsx = MicroReact.loadJsx;
-window.jsx = MicroReact.jsx;
-window.useState = MicroReact.useState;
-window.useReducer = MicroReact.useReducer;
-window.useEffect = MicroReact.useEffect;
-window.useLayoutEffect = MicroReact.useLayoutEffect;
-window.useRef = MicroReact.useRef;
-window.useMemo = MicroReact.useMemo;
-window.useCallback = MicroReact.useCallback;
-window.useId = MicroReact.useId;
-window.createContext = MicroReact.createContext;
-window.useContext = MicroReact.useContext;
-window.memo = MicroReact.memo;
-window.Router = MicroReact.Router;
-window.Link = MicroReact.Link;
-window.Route = MicroReact.Route;
-window.Outlet = MicroReact.Outlet;
-window.useOutletContext = MicroReact.useOutletContext;
-window.Routes = MicroReact.Routes;
-window.useLocation = MicroReact.useLocation;
-window.useNavigate = MicroReact.useNavigate;
-window.render = MicroReact.render;
-*/
 
 
 
 // ─── NAV ───
 function Nav() {
-  const { pathname: path } = useLocation();
   return html`
     <nav>
       <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
-      <${Link} to="/" class="nav-link${path === '/' ? ' active' : ''}">🏠 Home</${Link}>
-      <${Link} to="/about" class="nav-link${path === '/about' ? ' active' : ''}">📖 About</${Link}>
-      <${Link} to="/hello" class="nav-link${path === '/hello' ? ' active' : ''}">👋 Hello</${Link}>
+      <${NavLink} to="/" class="nav-link">🏠 Home</${NavLink}>
+      <${NavLink} to="/about" class="nav-link">📖 About</${NavLink}>
+      <${NavLink} to="/hello" class="nav-link">👋 Hello</${NavLink}>
     </nav>
   `;
 }

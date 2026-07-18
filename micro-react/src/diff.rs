@@ -2,7 +2,7 @@
 //! Preact-style skew diff with keyed matching. Entry points: diff_node(),
 //! diff_children(), rerender_component().
 
-use js_sys::{Function, Object, Reflect};
+use js_sys::{Array, Function, Object, Reflect};
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::{Document, Element, Node, Text};
@@ -950,6 +950,24 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 	// Special input props
 	match key {
 		"value" => {
+			if let Ok(select) = dom.clone().dyn_into::<web_sys::HtmlSelectElement>() {
+				if select.multiple() {
+					// Array-valued `value` selects every <option> whose value is a
+					// member of the array; a scalar is treated as a single-element set.
+					let values = prop_val_to_string_set(value);
+					let options = select.options();
+					for i in 0..options.length() {
+						if let Some(node) = options.item(i)
+							&& let Ok(opt) = node.dyn_into::<web_sys::HtmlOptionElement>()
+						{
+							opt.set_selected(values.contains(&opt.value()));
+						}
+					}
+				} else {
+					select.set_value(&prop_str(value));
+				}
+				return Ok(());
+			}
 			let s = prop_str(value);
 			if let Ok(input) = dom.clone().dyn_into::<web_sys::HtmlInputElement>() {
 				input.set_value(&s);
@@ -964,6 +982,22 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 			let b = matches!(value, PropVal::Bool(true));
 			if let Ok(input) = dom.clone().dyn_into::<web_sys::HtmlInputElement>() {
 				input.set_checked(b);
+			}
+			return Ok(());
+		}
+		// Uncontrolled-input initial value/checked (React's `defaultValue`/
+		// `defaultChecked`). These map to the real HTML `value`/`checked`
+		// attributes, which only seed the DOM property's *initial* state —
+		// the browser's own "dirty value" tracking keeps them from fighting
+		// user input on re-render, unlike the controlled `value`/`checked` above.
+		"defaultValue" => {
+			dom.set_attribute("value", &prop_str(value))?;
+			return Ok(());
+		}
+		"defaultChecked" => {
+			match value {
+				PropVal::Bool(true) => dom.set_attribute("checked", "")?,
+				_ => dom.remove_attribute("checked")?,
 			}
 			return Ok(());
 		}
@@ -1018,6 +1052,21 @@ fn prop_str(v: &PropVal) -> String {
 		PropVal::Num(n) => n.to_string(),
 		_ => String::new(),
 	}
+}
+
+/// Convert a `value` prop into the set of strings it selects, for a
+/// `<select multiple>`. React accepts an array of strings/numbers here;
+/// a lone scalar is treated as a single-element selection for convenience.
+fn prop_val_to_string_set(v: &PropVal) -> std::collections::HashSet<String> {
+	if let PropVal::Js(js) = v
+		&& Array::is_array(js)
+	{
+		return Array::from(js)
+			.iter()
+			.map(|item| item.as_string().unwrap_or_else(|| item.as_f64().map(|n| n.to_string()).unwrap_or_default()))
+			.collect();
+	}
+	std::iter::once(prop_str(v)).collect()
 }
 
 /// Convert a JS style object (`{ fontSize: '1rem' }`) into CSS text

@@ -153,3 +153,108 @@ fn hole_without_nested_jsx_is_unaffected_by_the_fix() {
 	let out = transpile_jsx_str("<div>{a < b ? x : y}</div>").expect("should transpile");
 	assert_eq!(out, "html`<div>${a < b ? x : y}</div>`");
 }
+
+// ── additional edge cases ──
+
+#[test]
+fn void_html_element_self_closing() {
+	let out = transpile_jsx_str("<br/>").expect("should transpile");
+	assert_eq!(out, "html`<br/>`");
+}
+
+#[test]
+fn boolean_style_attribute_with_no_value_passes_through() {
+	let out = transpile_jsx_str("<input disabled />").expect("should transpile");
+	assert_eq!(out, "html`<input disabled />`");
+}
+
+#[test]
+fn attribute_value_containing_gt_inside_quotes_does_not_end_tag_early() {
+	let out = transpile_jsx_str(r#"<div title="a > b">x</div>"#).expect("should transpile");
+	assert_eq!(out, r#"html`<div title="a > b">x</div>`"#);
+}
+
+#[test]
+fn attribute_value_containing_slash_gt_inside_quotes_is_not_self_closing() {
+	let out = transpile_jsx_str(r#"<a href="a/>b">x</a>"#).expect("should transpile");
+	assert_eq!(out, r#"html`<a href="a/>b">x</a>`"#);
+}
+
+#[test]
+fn component_name_starting_with_underscore_is_treated_as_component() {
+	let out = transpile_jsx_str("<_Internal />").expect("should transpile");
+	assert_eq!(out, "html`<${_Internal} />`");
+}
+
+#[test]
+fn dotted_component_name_is_a_single_hole() {
+	let out = transpile_jsx_str("<Context.Provider>x</Context.Provider>").expect("should transpile");
+	assert_eq!(out, "html`<${Context.Provider}>x</${Context.Provider}>`");
+}
+
+#[test]
+fn hyphenated_custom_element_stays_static() {
+	let out = transpile_jsx_str("<my-widget>x</my-widget>").expect("should transpile");
+	assert_eq!(out, "html`<my-widget>x</my-widget>`");
+}
+
+#[test]
+fn tag_name_with_digits_stays_static() {
+	let out = transpile_jsx_str("<h1>title</h1>").expect("should transpile");
+	assert_eq!(out, "html`<h1>title</h1>`");
+}
+
+#[test]
+fn component_name_with_digits_becomes_a_hole() {
+	let out = transpile_jsx_str("<Foo2 />").expect("should transpile");
+	assert_eq!(out, "html`<${Foo2} />`");
+}
+
+#[test]
+fn empty_element_with_no_children() {
+	let out = transpile_jsx_str("<div></div>").expect("should transpile");
+	assert_eq!(out, "html`<div></div>`");
+}
+
+#[test]
+fn literal_backtick_in_text_child_is_escaped() {
+	let out = transpile_jsx_str("<div>a `code` b</div>").expect("should transpile");
+	assert_eq!(out, "html`<div>a \\`code\\` b</div>`");
+}
+
+#[test]
+fn fragment_shorthand_nested_inside_a_hole() {
+	let out = transpile_jsx_str("<div>{cond && <>a</>}</div>").expect("should transpile");
+	assert_eq!(out, "html`<div>${cond && html`<${Fragment}>a</${Fragment}>`}</div>`");
+}
+
+#[test]
+fn multiple_sibling_holes_each_with_own_jsx() {
+	let out = transpile_jsx_str("const arr = [<div/>, <span/>];").expect("should transpile");
+	assert_eq!(out, "const arr = [html`<div/>`, html`<span/>`];");
+}
+
+#[test]
+fn malformed_closing_tag_missing_gt_is_a_real_error() {
+	let err = transpile_jsx_str("<div>x</div oops").unwrap_err();
+	assert!(matches!(err, JsxError::MalformedClosingTag(_)));
+}
+
+#[test]
+fn self_closing_component_with_attribute_holes() {
+	let out = transpile_jsx_str("<Foo bar={1} baz=\"x\" />").expect("should transpile");
+	assert_eq!(out, "html`<${Foo} bar=${1} baz=\"x\" />`");
+}
+
+#[test]
+fn whitespace_only_between_tags_is_preserved() {
+	let out = transpile_jsx_str("<div>  </div>").expect("should transpile");
+	assert_eq!(out, "html`<div>  </div>`");
+}
+
+#[test]
+fn single_quoted_string_containing_a_lt_is_not_treated_as_jsx() {
+	let src = "const s = 'a < div>fake</div>';";
+	let out = transpile_jsx_str(src).expect("should transpile");
+	assert_eq!(out, src);
+}

@@ -82,6 +82,7 @@ pub enum HookSlot {
 	Effect { deps: Option<Vec<DepVal>>, cleanup: Option<CleanupFn>, pending: Option<PendingEffectFn> },
 	LayoutEffect { deps: Option<Vec<DepVal>>, cleanup: Option<CleanupFn>, pending: Option<PendingEffectFn> },
 	Ref { value: crate::vnode::NodeRef },
+	RefVal { value: AnyCell },
 	Memo { value: Rc<dyn std::any::Any>, deps: Option<Vec<DepVal>> },
 	Id { value: String },
 }
@@ -426,6 +427,30 @@ pub fn use_memo<T: Clone + 'static>(factory: impl FnOnce() -> T, deps: Option<Ve
 
 pub fn use_callback<F: Clone + 'static>(f: F, deps: Option<Vec<DepVal>>) -> F {
 	use_memo(move || f, deps)
+}
+
+// ─── useRef ───
+
+/// A stable, mutable, type-erased cell — the general-purpose `useRef`
+/// (as opposed to `HookSlot::Ref`'s `NodeRef`, which is specifically for
+/// DOM-node refs attached via the `ref` prop). Unlike `useState`, getting
+/// or writing this cell never touches the scheduler, so calling it never
+/// triggers a re-render — this is what fixes `useRef` causing a spurious
+/// extra render on every component's first mount.
+pub fn use_ref_cell<T: 'static>(initial: impl FnOnce() -> T) -> AnyCell {
+	let inst = current_inst();
+	let idx = hook_idx!(inst);
+	hook_idx_inc!(inst);
+
+	if hooks_len!(inst) <= idx {
+		let val: Box<dyn std::any::Any> = Box::new(initial());
+		hooks_push!(inst, HookSlot::RefVal { value: Rc::new(RefCell::new(val)) });
+	}
+
+	match &hooks_ref!(inst)[idx] {
+		HookSlot::RefVal { value } => value.clone(),
+		_ => panic!("hook type mismatch at {}", idx),
+	}
 }
 
 // ─── useId ───

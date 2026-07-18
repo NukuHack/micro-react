@@ -227,6 +227,141 @@ mod tests {
 		let chars: Vec<char> = "{ still open".chars().collect();
 		assert_eq!(find_matching_brace(&chars, 0), None);
 	}
+
+	#[test]
+	fn find_matching_brace_handles_escaped_quotes_in_strings() {
+		// The escaped quote inside the string must not be mistaken for the
+		// string's terminator, which would otherwise throw off brace counting.
+		let src = r#"{ f("a\"}b"); }"#;
+		let chars: Vec<char> = src.chars().collect();
+		let close = find_matching_brace(&chars, 0).expect("brace should match");
+		assert_eq!(close, chars.len() - 1);
+	}
+
+	#[test]
+	fn find_matching_brace_single_quoted_string_with_braces() {
+		let src = "{ f('} not a close') }";
+		let chars: Vec<char> = src.chars().collect();
+		let close = find_matching_brace(&chars, 0).expect("brace should match");
+		assert_eq!(close, chars.len() - 1);
+	}
+
+	#[test]
+	fn find_matching_brace_nested_object_literal() {
+		let src = "{ style: { color: 'red' } }";
+		let chars: Vec<char> = src.chars().collect();
+		let close = find_matching_brace(&chars, 0).expect("brace should match");
+		assert_eq!(close, chars.len() - 1);
+	}
+
+	#[test]
+	fn find_matching_brace_skips_block_comment_containing_brace() {
+		let src = "{ /* } */ x }";
+		let chars: Vec<char> = src.chars().collect();
+		let close = find_matching_brace(&chars, 0).expect("brace should match");
+		assert_eq!(close, chars.len() - 1);
+	}
+
+	// ── skip_html_doctype ──
+
+	#[test]
+	fn skip_html_doctype_finds_end_of_doctype() {
+		let chars: Vec<char> = "<!DOCTYPE html>rest".chars().collect();
+		assert_eq!(skip_html_doctype(&chars, 0), Some(15));
+	}
+
+	#[test]
+	fn skip_html_doctype_none_for_ordinary_tag() {
+		let chars: Vec<char> = "<div>".chars().collect();
+		assert_eq!(skip_html_doctype(&chars, 0), None);
+	}
+
+	#[test]
+	fn skip_html_doctype_none_for_comment() {
+		// `<!--` is a comment, not a doctype-like declaration; callers try
+		// `skip_html_comment` first, but this should still refuse to match it.
+		let chars: Vec<char> = "<!-- not a doctype -->".chars().collect();
+		assert_eq!(skip_html_doctype(&chars, 0), Some(chars.len()));
+	}
+
+	#[test]
+	fn skip_html_doctype_unterminated_stops_at_input_end() {
+		let chars: Vec<char> = "<!DOCTYPE html".chars().collect();
+		assert_eq!(skip_html_doctype(&chars, 0), Some(chars.len()));
+	}
+
+	// ── skip_js_string ──
+
+	#[test]
+	fn skip_js_string_double_quoted() {
+		let chars: Vec<char> = r#""hello" rest"#.chars().collect();
+		assert_eq!(skip_js_string(&chars, 0), Some(7));
+	}
+
+	#[test]
+	fn skip_js_string_single_quoted() {
+		let chars: Vec<char> = "'hello' rest".chars().collect();
+		assert_eq!(skip_js_string(&chars, 0), Some(7));
+	}
+
+	#[test]
+	fn skip_js_string_handles_escaped_quote() {
+		let chars: Vec<char> = r#""a\"b" rest"#.chars().collect();
+		let end = skip_js_string(&chars, 0).expect("should find end");
+		let s: String = chars[0..end].iter().collect();
+		assert_eq!(s, r#""a\"b""#);
+	}
+
+	#[test]
+	fn skip_js_string_none_for_non_quote_start() {
+		let chars: Vec<char> = "not a string".chars().collect();
+		assert_eq!(skip_js_string(&chars, 0), None);
+	}
+
+	#[test]
+	fn skip_js_string_template_literal_with_hole() {
+		let chars: Vec<char> = "`a${b}c` rest".chars().collect();
+		assert_eq!(skip_js_string(&chars, 0), Some(8));
+	}
+
+	#[test]
+	fn skip_js_string_template_literal_hole_containing_braces() {
+		let chars: Vec<char> = "`a${ {} }c` rest".chars().collect();
+		let end = skip_js_string(&chars, 0).expect("should find end");
+		assert_eq!(chars[end - 1], '`');
+	}
+
+	#[test]
+	fn skip_js_string_unterminated_reaches_end_of_input() {
+		let chars: Vec<char> = "\"no closing quote".chars().collect();
+		assert_eq!(skip_js_string(&chars, 0), Some(chars.len()));
+	}
+
+	// ── skip_js_comment ──
+
+	#[test]
+	fn skip_js_comment_line_comment_stops_before_newline() {
+		let chars: Vec<char> = "// hi\nrest".chars().collect();
+		assert_eq!(skip_js_comment(&chars, 0), Some(5));
+	}
+
+	#[test]
+	fn skip_js_comment_block_comment_finds_close() {
+		let chars: Vec<char> = "/* hi */rest".chars().collect();
+		assert_eq!(skip_js_comment(&chars, 0), Some(8));
+	}
+
+	#[test]
+	fn skip_js_comment_unterminated_block_reaches_end() {
+		let chars: Vec<char> = "/* never closes".chars().collect();
+		assert_eq!(skip_js_comment(&chars, 0), Some(chars.len()));
+	}
+
+	#[test]
+	fn skip_js_comment_none_for_plain_division() {
+		let chars: Vec<char> = "a / b".chars().collect();
+		assert_eq!(skip_js_comment(&chars, 2), None);
+	}
 }
 
 #[cfg(test)]

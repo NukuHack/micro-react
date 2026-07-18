@@ -106,6 +106,71 @@ fn empty_pattern_matches_only_root() {
 	assert!(p.matches("/x").is_none());
 }
 
+#[wasm_bindgen_test]
+fn param_segment_captures_unicode_characters() {
+	let p = Pattern::compile("/users/:name");
+	let params = p.matches("/users/José").expect("should match");
+	assert_eq!(params.get("name"), Some(&"José".to_string()));
+}
+
+#[wasm_bindgen_test]
+fn matching_is_case_sensitive_for_static_segments() {
+	let p = Pattern::compile("/About");
+	assert!(p.matches("/About").is_some());
+	assert!(p.matches("/about").is_none());
+}
+
+#[wasm_bindgen_test]
+fn param_segment_can_contain_dots_and_hyphens() {
+	let p = Pattern::compile("/files/:name");
+	let params = p.matches("/files/report-v1.2.pdf").expect("should match");
+	assert_eq!(params.get("name"), Some(&"report-v1.2.pdf".to_string()));
+}
+
+#[wasm_bindgen_test]
+fn trailing_wildcard_after_static_prefix_matches_deep_paths() {
+	let p = Pattern::compile("/docs/*");
+	assert!(p.matches("/docs").is_none(), "wildcard requires the /docs/ prefix to be present");
+	assert!(p.matches("/docs/a/b/c").is_some());
+}
+
+#[wasm_bindgen_test]
+fn bare_wildcard_pattern_matches_everything() {
+	let p = Pattern::compile("/*");
+	assert!(p.matches("/").is_some());
+	assert!(p.matches("/anything/at/all").is_some());
+}
+
+#[wasm_bindgen_test]
+fn param_name_repeated_in_pattern_keeps_the_last_captured_value() {
+	// Not necessarily desirable behavior, but pins down what actually
+	// happens today: both capture groups map to the same key, so the
+	// later one in iteration order wins in the resulting HashMap.
+	let p = Pattern::compile("/:id/nested/:id");
+	let params = p.matches("/1/nested/2").expect("should match");
+	assert_eq!(params.get("id"), Some(&"2".to_string()));
+}
+
+#[wasm_bindgen_test]
+fn pattern_with_only_slashes_behaves_like_root() {
+	let p = Pattern::compile("//");
+	assert!(p.matches("/").is_some());
+}
+
+#[wasm_bindgen_test]
+fn param_segment_does_not_match_an_empty_segment() {
+	let p = Pattern::compile("/users/:id");
+	assert!(p.matches("/users/").is_none());
+}
+
+#[wasm_bindgen_test]
+fn static_segment_with_regex_metacharacters_is_escaped_throughout() {
+	let p = Pattern::compile("/a+b(c)/x?");
+	assert!(p.matches("/a+b(c)/x?").is_some());
+	// If unescaped, "+" "(" ")" "?" would all behave as regex operators.
+	assert!(p.matches("/aab/x").is_none());
+}
+
 // ─── useNavigate memoization ───
 
 fn make_container() -> web_sys::Element {
