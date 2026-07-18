@@ -697,6 +697,21 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 	Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
 }
 
+// ─── Boot convenience: bundle the non-standard exports ───
+
+/// Bundles the values that aren't plain `wasm-bindgen` exports (`Fragment`
+/// is a `Symbol`, `ErrorBoundary` a stateful `Closure`) into one object, so
+/// callers get both from a single call right after module init instead of
+/// deriving each by hand. `getFragment`/`createErrorBoundary` stay exported
+/// too, for callers who want a fresh, independent `ErrorBoundary` instance.
+#[wasm_bindgen(js_name = createExtras)]
+pub fn js_create_extras() -> Result<JsValue, JsValue> {
+	let obj = Object::new();
+	Reflect::set(&obj, &"Fragment".into(), &get_fragment())?;
+	Reflect::set(&obj, &"ErrorBoundary".into(), &js_create_error_boundary())?;
+	Ok(obj.into())
+}
+
 // ─── VNode ↔ JS conversion helpers ───
 
 pub(crate) fn js_to_vnode(v: &JsValue) -> Result<VNode, JsValue> {

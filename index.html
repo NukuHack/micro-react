@@ -22,14 +22,12 @@ if (sessionStorage.redirect) {
 window.MicroReact = await import('./micro-react/pkg/micro_react.js')
   .then(async (m) => { await m.default(); return m; });
 
-// Fragment / ErrorBoundary / html aren't plain wasm-bindgen exports,
-// so derive them here once, right after init.
-window.Fragment = MicroReact.getFragment();
-window.ErrorBoundary = MicroReact.createErrorBoundary();
+// html is a wrapper: tagged templates call (strings, ...values), the
+// wasm export needs (strings, valuesArray) — no way to avoid this one.
 window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 
-// Make everything available globally
-Object.assign(window, MicroReact);
+// make everything Global
+Object.assign(window, MicroReact, MicroReact.createExtras());
 
 
 
