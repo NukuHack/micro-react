@@ -3,13 +3,11 @@
 //! the rest of `tests/`) so `build.sh`'s single
 //! `wasm-pack test --headless --firefox` step picks them up alongside
 //! everything else. `set_event_handler` (the DOM-touching half of this
-//! module) is covered separately in `tests/events_dom.rs`.
+//! module) is covered separately in `tests/browser/events_dom.rs`.
 
 use wasm_bindgen_test::*;
 
 use micro_react::events::parse_event_prop;
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 fn simple_click() {

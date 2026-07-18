@@ -2,8 +2,8 @@
 //! `vnode::NodeRef`), driven through `Root::render` exactly like real
 //! `ref="${...}"` usage in `html\`\``.
 //!
-//! `tests/vnode_unit.rs` claims this is "covered by other
-//! wasm-bindgen-test files (tests/reconciler.rs, tests/events_dom.rs)" —
+//! `tests/browser/vnode_unit.rs` claims this is "covered by other
+//! wasm-bindgen-test files (tests/browser/reconciler.rs, tests/browser/events_dom.rs)" —
 //! it isn't; neither file references `ref_`/`NodeRef` at all. This file
 //! closes that gap. Needs a real DOM, so like the rest of the
 //! `wasm-bindgen-test` suite:
@@ -18,8 +18,6 @@ use wasm_bindgen_test::*;
 
 use micro_react::render::Root;
 use micro_react::vnode::{ComponentFn, NodeRef, Props, VNode};
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 fn make_container() -> web_sys::Element {
 	let doc = web_sys::window().unwrap().document().unwrap();

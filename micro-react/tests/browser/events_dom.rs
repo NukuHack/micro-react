@@ -2,7 +2,7 @@
 //! Preact-style logical-clock proxy listener on real DOM elements and
 //! must dispatch/suppress handlers correctly — needs a real DOM + JS
 //! function values, so these run via `wasm-bindgen-test` in a headless
-//! browser (see `tests/reconciler.rs` for the invocation).
+//! browser (see `tests/browser/reconciler.rs` for the invocation).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,8 +10,6 @@ use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_test::*;
 
 use micro_react::events::set_event_handler;
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 fn make_button() -> web_sys::Element {
 	let doc = web_sys::window().unwrap().document().unwrap();

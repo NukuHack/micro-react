@@ -3,7 +3,7 @@
 //! the `FLAG_*` reconciler-bookkeeping constants, `PropVal::Callback`/`Js`
 //! equality, `ComponentFn::new`'s error path, and `with_key` on `Fragment`.
 //!
-//! Complements `tests/vnode_unit.rs`, which covers the more commonly-hit
+//! Complements `tests/browser/vnode_unit.rs`, which covers the more commonly-hit
 //! constructors/builders. Runs via `wasm-bindgen-test` (like the rest of
 //! `tests/`) since a few cases touch real JS functions/DOM elements:
 //!
@@ -14,8 +14,6 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
 
 use micro_react::vnode::{ComponentFn, ComponentInstSlot, FLAG_INSERT, FLAG_MATCHED, JsCallback, NodeRef, PropVal, VNode, VNodeInner};
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 fn make_element() -> web_sys::Element {
 	web_sys::window().unwrap().document().unwrap().create_element("div").unwrap()

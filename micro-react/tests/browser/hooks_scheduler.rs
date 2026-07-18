@@ -3,7 +3,7 @@
 //! components exercise them — hooks only work inside `with_inst`, which
 //! is set up by the diff engine for `Component` vnodes, and several of
 //! them (setState -> reschedule, effects) need a real DOM, so — like
-//! `tests/reconciler.rs` — these run via `wasm-bindgen-test` in a
+//! `tests/browser/reconciler.rs` — these run via `wasm-bindgen-test` in a
 //! headless browser:
 //!
 //!     wasm-pack test --headless --chrome
@@ -18,7 +18,7 @@
 //! Pure-logic pieces that don't need a live component (Context's plain
 //! get/set/subscribe bookkeeping, `parse_event_prop`, VNode builders,
 //! `Pattern`) are covered separately with plain `cargo test --lib` unit
-//! tests or in `tests/router.rs`.
+//! tests or in `tests/browser/router.rs`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,8 +29,6 @@ use micro_react::hooks::*;
 use micro_react::render::Root;
 use micro_react::scheduler::{MAX_FLUSH_ITERATIONS, flush_rerenders};
 use micro_react::vnode::{ComponentFn, Props, VNode};
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 fn make_container() -> web_sys::Element {
 	let doc = web_sys::window().unwrap().document().unwrap();

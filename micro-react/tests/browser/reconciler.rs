@@ -44,8 +44,6 @@ use wasm_bindgen_test::*;
 use micro_react::render::Root;
 use micro_react::vnode::{ComponentFn, Props, VNode};
 
-wasm_bindgen_test_configure!(run_in_browser);
-
 fn make_container() -> web_sys::Element {
 	let doc = web_sys::window().unwrap().document().unwrap();
 	let el = doc.create_element("div").unwrap();

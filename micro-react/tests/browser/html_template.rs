@@ -2,7 +2,7 @@
 //! compiling a call-site's static skeleton once and substituting live
 //! values into it, end to end through real DOM rendering.
 //!
-//! Like `tests/reconciler.rs`, these need a real DOM/JS runtime, so they
+//! Like `tests/browser/reconciler.rs`, these need a real DOM/JS runtime, so they
 //! run through `wasm-bindgen-test` rather than plain `cargo test`:
 //!
 //!     wasm-pack test --headless --chrome
@@ -23,8 +23,6 @@ use wasm_bindgen_test::*;
 
 use micro_react::bindings::{JsRoot, render as mount_root};
 use micro_react::html_template::html_template;
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 // ─────────────────────────── test helpers ───────────────────────────
 

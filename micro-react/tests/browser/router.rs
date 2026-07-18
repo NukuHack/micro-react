@@ -2,7 +2,7 @@
 //!
 //! `Pattern::matches` builds and executes a `js_sys::RegExp`, which calls
 //! into a real JS engine — under a plain `cargo test --lib` target that
-//! panics ("not supported outside wasm"), so like `tests/reconciler.rs`
+//! panics ("not supported outside wasm"), so like `tests/browser/reconciler.rs`
 //! these run via `wasm-bindgen-test` in an actual (headless) browser:
 //!
 //!     wasm-pack test --headless --chrome
@@ -22,8 +22,6 @@ use micro_react::render::Root;
 use micro_react::router::{Pattern, js_use_navigate};
 use micro_react::scheduler::flush_rerenders;
 use micro_react::vnode::{ComponentFn, Props, VNode};
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 fn static_path_matches_exactly() {

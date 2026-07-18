@@ -4,15 +4,13 @@
 //! `wasm-pack test --headless --firefox` step picks them up alongside
 //! everything else. `PropVal::Callback`/`PropVal::Js`, `NodeRef` DOM sync,
 //! and `Portal`'s `Element` field all need a real JS/DOM runtime and are
-//! covered by other `wasm-bindgen-test` files (`tests/reconciler.rs`,
-//! `tests/events_dom.rs`).
+//! covered by other `wasm-bindgen-test` files (`tests/browser/reconciler.rs`,
+//! `tests/browser/events_dom.rs`).
 
 use std::rc::Rc;
 use wasm_bindgen_test::*;
 
 use micro_react::vnode::{Children, ComponentFn, NodeRef, PropVal, Props, Template, VNode, VNodeInner, next_id};
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 // ── next_id / Template ──
 
@@ -278,7 +276,7 @@ fn node_ref_with_sync_starts_empty_too() {
 	// `set()` (the method that actually populates the node and invokes the
 	// sync callback) is `pub(crate)` — only the diff engine is meant to
 	// call it, so it's exercised indirectly via `ref_()` on a live
-	// component tree in `tests/reconciler.rs` rather than directly here.
+	// component tree in `tests/browser/reconciler.rs` rather than directly here.
 	let seen = Rc::new(std::cell::RefCell::new(Vec::<bool>::new()));
 	let seen_clone = seen.clone();
 	let r = NodeRef::with_sync(move |node| seen_clone.borrow_mut().push(node.is_some()));

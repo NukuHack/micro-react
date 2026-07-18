@@ -7,15 +7,13 @@
 //!
 //! `use_context` itself needs a live `ComponentInst` (via `current_weak()`
 //! / `use_effect_nodrop`), so it's covered by the component-level
-//! integration tests in `tests/hooks_scheduler.rs` instead.
+//! integration tests in `tests/browser/hooks_scheduler.rs` instead.
 
 use std::cell::Cell;
 use std::rc::Rc;
 use wasm_bindgen_test::*;
 
 use micro_react::context::Context;
-
-wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
 fn new_context_returns_default_value() {
