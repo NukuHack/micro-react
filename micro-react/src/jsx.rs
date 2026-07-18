@@ -60,9 +60,24 @@ fn looks_like_jsx_start(chars: &[char], i: usize) -> bool {
 	}
 }
 
+/// Synthetic attribute name prefix used to smuggle a JSX spread
+/// (`{...expr}`) through the `html`` sentinel-HTML pipeline. Attribute
+/// *names* in that pipeline must be static text (see the comment on
+/// `build_case_map` in html_template.rs) so a bare `...expr` can't be
+/// represented directly; instead it's rewritten as a normal
+/// `name="${expr}"` attribute using this reserved name prefix, and
+/// `html_template::compile_node` recognizes the prefix and treats the
+/// value as a props object to merge rather than a literal attribute.
+/// The char offset of the opening `{` is appended to keep multiple
+/// spreads on the same tag unique; DOM attribute order (and therefore
+/// override order) still matches source order either way.
+pub(crate) const SPREAD_ATTR_PREFIX: &str = "__mrspread-";
+
 /// Renders a JSX attribute section (`from` is just after the tag name) up
 /// to its terminating `>` or self-closing `/>`, converting `{expr}` holes
-/// into `${expr}` and leaving quoted attribute values untouched.
+/// into `${expr}` and leaving quoted attribute values untouched. A bare
+/// `{...expr}` spread attribute is rewritten into a synthetic
+/// `__mrspread-N="${expr}"` attribute (see `SPREAD_ATTR_PREFIX`).
 fn render_jsx_attrs(chars: &[char], from: usize) -> Result<(String, usize, bool), JsxError> {
 	let n = chars.len();
 	let mut out = String::new();
@@ -88,9 +103,18 @@ fn render_jsx_attrs(chars: &[char], from: usize) -> Result<(String, usize, bool)
 			'{' => {
 				let close = find_matching_brace(chars, i).ok_or(JsxError::UnbalancedHole(i))?;
 				let inner: String = chars[i + 1..close].iter().collect();
-				out.push_str("${");
-				out.push_str(&transpile_jsx_str(&inner)?);
-				out.push('}');
+				if let Some(expr) = inner.trim_start().strip_prefix("...") {
+					// `{...expr}` — a spread, not a `name={value}` pair.
+					// Rewritten as an ordinary attribute so it survives the
+					// sentinel-HTML round trip; see `SPREAD_ATTR_PREFIX`.
+					out.push_str(&format!("{SPREAD_ATTR_PREFIX}{i}=\"${{"));
+					out.push_str(&transpile_jsx_str(expr.trim())?);
+					out.push_str("}\"");
+				} else {
+					out.push_str("${");
+					out.push_str(&transpile_jsx_str(&inner)?);
+					out.push('}');
+				}
 				i = close + 1;
 			}
 			'/' if chars.get(i + 1) == Some(&'>') => return Ok((out, i + 2, true)),

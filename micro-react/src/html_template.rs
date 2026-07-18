@@ -405,6 +405,21 @@ struct AttrTemplate {
 	value: AttrValueTemplate,
 }
 
+/// One entry in an element's attribute list, in source order. Keeping
+/// spreads interleaved with named props (rather than splitting them into
+/// separate lists) matters for correctness: JS object-spread semantics are
+/// order-dependent — `{...a} b="1"` and `b="1" {...a}` can produce
+/// different results if `a` also has a `b` key, with whichever comes last
+/// winning.
+#[derive(Clone, Debug)]
+enum AttrEntry {
+	Prop(AttrTemplate),
+	/// `{...expr}` (see `crate::jsx::SPREAD_ATTR_PREFIX`): the hole
+	/// resolves to a props object at render time, whose own keys/values
+	/// are merged in at this position.
+	Spread(usize),
+}
+
 #[derive(Clone, Debug)]
 enum ChildTemplate {
 	StaticText(String),
@@ -426,8 +441,7 @@ enum ChildTemplate {
 #[derive(Clone, Debug)]
 struct ElementTemplate {
 	tag: TagSource,
-	static_attrs: Vec<(String, String)>,
-	attr_holes: Vec<AttrTemplate>,
+	attrs: Vec<AttrEntry>,
 	key: Option<AttrValueTemplate>,
 	ref_hole: Option<usize>,
 	children: Vec<ChildTemplate>,
@@ -606,15 +620,28 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 				None => TagSource::Static(tag_name),
 			};
 
-			let mut static_attrs = Vec::new();
-			let mut attr_holes = Vec::new();
+			let mut attrs = Vec::new();
 			let mut key = None;
 			let mut ref_hole = None;
 
-			let attrs = elem.attributes();
-			for i in 0..attrs.length() {
-				let Some(a) = attrs.item(i) else { continue };
-				let name = normalize_attr_name(&a.name(), case_map);
+			let dom_attrs = elem.attributes();
+			for i in 0..dom_attrs.length() {
+				let Some(a) = dom_attrs.item(i) else { continue };
+				let raw_name = a.name();
+
+				// `{...expr}` was rewritten by the JSX transpiler into a
+				// synthetic `__mrspread-N="${expr}"` attribute so it could
+				// survive the DOM round trip; unwrap it back into a Spread
+				// entry instead of treating it as a literal prop. By
+				// construction its value is always exactly one hole.
+				if raw_name.starts_with(crate::jsx::SPREAD_ATTR_PREFIX) {
+					if let AttrValueTemplate::Hole(idx) = attr_value_template(&a.value()) {
+						attrs.push(AttrEntry::Spread(idx));
+					}
+					continue;
+				}
+
+				let name = normalize_attr_name(&raw_name, case_map);
 				let value_tpl = attr_value_template(&a.value());
 
 				if name == "key" {
@@ -625,10 +652,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 					}
 					// A static `ref="..."` string can't be a real ref; skip it.
 				} else {
-					match value_tpl {
-						AttrValueTemplate::Static(s) => static_attrs.push((name, s)),
-						other => attr_holes.push(AttrTemplate { name, value: other }),
-					}
+					attrs.push(AttrEntry::Prop(AttrTemplate { name, value: value_tpl }));
 				}
 			}
 
@@ -642,7 +666,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 				}
 			}
 
-			Some(ChildTemplate::Element(Box::new(ElementTemplate { tag, static_attrs, attr_holes, key, ref_hole, children })))
+			Some(ChildTemplate::Element(Box::new(ElementTemplate { tag, attrs, key, ref_hole, children })))
 		}
 		_ => None,
 	}
@@ -863,26 +887,58 @@ fn render_child(ct: &ChildTemplate, values: &Array, out: &mut Vec<VNode>) {
 	}
 }
 
-fn build_static_attrs(builder: crate::vnode::ElementBuilder, tpl: &ElementTemplate, values: &Array) -> crate::vnode::ElementBuilder {
-	let mut builder = builder;
-	for (k, v) in &tpl.static_attrs {
-		builder = builder.attr(k.clone(), v.clone());
-	}
-	for a in &tpl.attr_holes {
-		// `dangerouslySetInnerHTML={{ __html }}` — diff::set_prop expects the
-		// flattened key "dangerouslySetInnerHTML.__html" as a plain string,
-		// so unwrap it here rather than passing an opaque `PropVal::Js`.
-		if a.name == "dangerouslySetInnerHTML"
-			&& let AttrValueTemplate::Hole(i) = &a.value
-		{
-			let raw = values.get(*i as u32);
-			let html_val = Reflect::get(&raw, &"__html".into()).unwrap_or(JsValue::UNDEFINED);
-			if let Some(s) = html_val.as_string() {
-				builder = builder.attr("dangerouslySetInnerHTML.__html", s);
+/// Resolves a `{...expr}` hole's live value into `(name, value)` pairs to
+/// merge into the surrounding element/component's props, mirroring how
+/// `bindings::create_element` walks a JS props object: only the object's
+/// own enumerable keys are taken, and `key`/`ref` are skipped since those
+/// are positional JSX concepts, not real DOM/component props, even when
+/// they happen to ride along inside a spread value.
+fn spread_attr_entries(v: &JsValue) -> Vec<(String, PropVal)> {
+	let mut out = Vec::new();
+	if v.is_object()
+		&& !v.is_null()
+		&& let Some(obj) = v.dyn_ref::<Object>()
+	{
+		for k in Object::keys(obj).iter() {
+			let k_str = k.as_string().unwrap_or_default();
+			if k_str == "key" || k_str == "ref" {
 				continue;
 			}
+			if let Ok(val) = Reflect::get(v, &k) {
+				out.push((k_str, js_val_to_prop_val(&val)));
+			}
 		}
-		builder = builder.attr(a.name.clone(), resolve_attr_value(&a.value, values));
+	}
+	out
+}
+
+fn build_attrs(builder: crate::vnode::ElementBuilder, tpl: &ElementTemplate, values: &Array) -> crate::vnode::ElementBuilder {
+	let mut builder = builder;
+	for entry in &tpl.attrs {
+		match entry {
+			AttrEntry::Prop(a) => {
+				// `dangerouslySetInnerHTML={{ __html }}` — diff::set_prop expects the
+				// flattened key "dangerouslySetInnerHTML.__html" as a plain string,
+				// so unwrap it here rather than passing an opaque `PropVal::Js`.
+				if a.name == "dangerouslySetInnerHTML"
+					&& let AttrValueTemplate::Hole(i) = &a.value
+				{
+					let raw = values.get(*i as u32);
+					let html_val = Reflect::get(&raw, &"__html".into()).unwrap_or(JsValue::UNDEFINED);
+					if let Some(s) = html_val.as_string() {
+						builder = builder.attr("dangerouslySetInnerHTML.__html", s);
+						continue;
+					}
+				}
+				builder = builder.attr(a.name.clone(), resolve_attr_value(&a.value, values));
+			}
+			AttrEntry::Spread(i) => {
+				let raw = values.get(*i as u32);
+				for (k, v) in spread_attr_entries(&raw) {
+					builder = builder.attr(k, v);
+				}
+			}
+		}
 	}
 	builder
 }
@@ -899,7 +955,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 	match &tpl.tag {
 		TagSource::Static(tag) => {
 			let mut builder = VNode::tag(tag.clone());
-			builder = build_static_attrs(builder, tpl, values);
+			builder = build_attrs(builder, tpl, values);
 			if let Some(k) = key {
 				builder = builder.key(k);
 			}
@@ -924,7 +980,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 			// e.g. `` html`<${tagVar} />` `` where `tagVar = "section"`.
 			if let Some(tag) = type_val.as_string() {
 				let mut builder = VNode::tag(tag);
-				builder = build_static_attrs(builder, tpl, values);
+				builder = build_attrs(builder, tpl, values);
 				if let Some(k) = key {
 					builder = builder.key(k);
 				}
@@ -936,17 +992,21 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 
 			// A hole that evaluates to a function is a component reference —
 			// wire it up exactly like `createElement` does: static + dynamic
-			// attrs become props, children get attached as `props.children`.
+			// attrs (and any spread props, merged in source order) become
+			// props, children get attached as `props.children`.
 			if type_val.is_function() {
 				let fn_: js_sys::Function = type_val.clone().unchecked_into();
 				let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
 
 				let mut props: Props = Vec::new();
-				for (k, v) in &tpl.static_attrs {
-					props.push((k.clone(), PropVal::Str(v.clone())));
-				}
-				for a in &tpl.attr_holes {
-					props.push((a.name.clone(), resolve_attr_value(&a.value, values)));
+				for entry in &tpl.attrs {
+					match entry {
+						AttrEntry::Prop(a) => props.push((a.name.clone(), resolve_attr_value(&a.value, values))),
+						AttrEntry::Spread(i) => {
+							let raw = values.get(*i as u32);
+							props.extend(spread_attr_entries(&raw));
+						}
+					}
 				}
 
 				let children_for_fn = child_vnodes.clone();
