@@ -182,12 +182,12 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 
 	let old_elem = old_vnode.and_then(|o| o._dom.clone().and_then(|n| n.dyn_into::<Element>().ok()));
 
-	let old_props = old_vnode
-		.and_then(|o| match &o.inner {
-			VNodeInner::Element { props, .. } => Some(props.clone()),
-			_ => None,
-		})
-		.unwrap_or_default();
+	// Set to `None` if we end up creating a brand new DOM element below (tag
+	// mismatch), since at that point the old vnode's subtree — including any
+	// DOM nodes referenced by its children — belongs to a different,
+	// about-to-be-detached element and must not be treated as reusable state
+	// for props/children diffing against the new element.
+	let mut old_vnode = old_vnode;
 
 	// Reuse or create DOM element
 	let dom: Element = match old_elem {
@@ -203,14 +203,47 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 			e
 		}
 		_other => {
-			// Unmount old tree if replacing a different element
+			// Unmount old tree if replacing a different element. Tear down its
+			// hooks/effects/refs, but leave its DOM node attached for now
+			// (skip_remove=true) — diff_element can be reached two ways:
+			// through diff_children's list matching (where old/new never
+			// share a type_tag for a tag mismatch, so old_vnode here is
+			// always None and this branch is just a fresh mount with nothing
+			// to swap) or directly from diff_component's single-child
+			// `diff_node(parent_dom, &mut rendered, old_rendered, ns)` call
+			// when a component's own rendered root element changes tag
+			// across a re-render (e.g. `<Routes>` falling from a matched
+			// route's `<div>` to the `<p>404</p>` default). In that second
+			// case nothing else ever inserts the new node or removes the
+			// old one — diff_component only swaps DOM for its *own*
+			// component-identity mismatches (`stale_dom`), not for a
+			// mismatch inside the vnode it rendered — so without splicing
+			// here the old node would leak in the DOM forever and the new
+			// one would never appear.
+			let stale_dom: Option<Node> = old_vnode.and_then(|o| o._dom.clone());
 			if let Some(old) = old_vnode {
 				unmount_vnode(old, true);
 			}
 			let doc = document();
-			if let Some(ns) = ns_uri(&ns) { doc.create_element_ns(Some(ns), &tag)? } else { doc.create_element(&tag)? }
+			let new_elem = if let Some(ns) = ns_uri(&ns) { doc.create_element_ns(Some(ns), &tag)? } else { doc.create_element(&tag)? };
+			if let Some(stale) = &stale_dom {
+				let new_node: Node = new_elem.clone().into();
+				parent_dom.insert_before(&new_node, Some(stale))?;
+				if let Some(p) = stale.parent_node() {
+					let _ = p.remove_child(stale);
+				}
+			}
+			old_vnode = None;
+			new_elem
 		}
 	};
+
+	let old_props = old_vnode
+		.and_then(|o| match &o.inner {
+			VNodeInner::Element { props, .. } => Some(props.clone()),
+			_ => None,
+		})
+		.unwrap_or_default();
 
 	let old_was_element = matches!(old_vnode.map(|o| &o.inner), Some(VNodeInner::Element { .. }));
 

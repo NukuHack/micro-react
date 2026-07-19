@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Compile",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "sh build.sh -n",
+            "cwd": "${workspaceFolder}/micro-react/"
+        },
+        {
+            "name": "Compile & Test",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "sh build.sh -y",
+            "cwd": "${workspaceFolder}/micro-react/"
+        },
+        {
+            "name": "Quick & Compile",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "sh build.sh -q",
+            "cwd": "${workspaceFolder}/micro-react/"
+        }
+    ]
+}

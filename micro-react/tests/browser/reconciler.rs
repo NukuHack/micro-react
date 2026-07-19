@@ -753,3 +753,61 @@ fn sibling_component_stays_interactive_after_unrelated_subtree_fails_deep_inside
 		"sibling should still be interactive (able to rerender itself) after an unrelated subtree failed, got: {html_final}"
 	);
 }
+
+// ─── A component's own rendered root element changing tag across a re-render ───
+//
+// `diff_component` diffs a component's rendered output via a direct
+// `diff_node(parent_dom, &mut rendered, old_rendered, ns)` call — bypassing
+// `diff_children`'s list matching entirely, since there's only ever one
+// "child" here (the component's own output), not a list to match against.
+// When that output's root element changes tag between renders (e.g. a
+// `<Routes>` falling from a matched route's `<div>` to a `<p>404</p>`
+// default), `diff_element`'s tag-mismatch branch used to create the new
+// element but never insert it into the DOM, while leaving the *old*
+// element attached (its removal was `skip_remove=true`, on the assumption
+// some caller would swap it in later) — nothing ever did, since
+// `diff_component`'s own DOM-swap logic (`stale_dom`) only fires for a
+// mismatch in the component's own identity, not a mismatch inside the
+// vnode it rendered. The old node leaked in the DOM forever and the new
+// one silently never appeared (or, worse, a later insertBefore elsewhere
+// in the tree could throw NotFoundError against a stale anchor).
+#[wasm_bindgen_test]
+fn component_root_element_tag_change_replaces_dom_node_in_place() {
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	let toggle_slot: Rc<RefCell<Option<Rc<dyn Fn(bool)>>>> = Rc::new(RefCell::new(None));
+	let toggle_slot_for_comp = toggle_slot.clone();
+
+	let comp = ComponentFn::infallible(move |_props: Props| {
+		let (as_paragraph, set_as_paragraph) = micro_react::hooks::use_state(false);
+		*toggle_slot_for_comp.borrow_mut() = Some(set_as_paragraph);
+		if as_paragraph { VNode::tag("p").text("404 Not Found").build() } else { VNode::tag("div").text("First").build() }
+	});
+
+	root.render(VNode::component("Toggler", comp, vec![])).expect("initial render should succeed");
+	assert_eq!(container.query_selector("div").unwrap().unwrap().text_content().as_deref(), Some("First"));
+	assert!(container.query_selector("p").unwrap().is_none(), "no <p> should exist before the toggle");
+
+	let set_as_paragraph = toggle_slot.borrow().clone().expect("Toggler should have registered its setter on mount");
+	set_as_paragraph(true);
+	micro_react::scheduler::flush_rerenders();
+
+	assert!(container.query_selector("div").unwrap().is_none(), "the old <div> should have been removed, not left as a leaked zombie node");
+	assert_eq!(
+		container.query_selector("p").unwrap().and_then(|p| p.text_content()).as_deref(),
+		Some("404 Not Found"),
+		"the new <p> should have been inserted into the DOM"
+	);
+	assert_eq!(container.children().length(), 1, "exactly one element should remain in the container, not both the old and new nodes");
+
+	// And the reverse direction, to rule out a fix that only special-cases
+	// "shrinking" (div -> p) but not "growing" (p -> div) tag changes.
+	let set_as_paragraph = toggle_slot.borrow().clone().unwrap();
+	set_as_paragraph(false);
+	micro_react::scheduler::flush_rerenders();
+
+	assert!(container.query_selector("p").unwrap().is_none(), "the old <p> should have been removed after toggling back");
+	assert_eq!(container.query_selector("div").unwrap().and_then(|d| d.text_content()).as_deref(), Some("First"));
+	assert_eq!(container.children().length(), 1);
+}

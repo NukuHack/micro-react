@@ -107,8 +107,54 @@ fn current_location() -> (String, String) {
 	(path, search)
 }
 
+/// Yields `(pattern, handler)` pairs from a `routes` value in the order
+/// `Router` should try them.
+///
+/// If `routes` is a JS `Array` (e.g. `[["/a", fn], ["/b", fn]]`), pairs are
+/// yielded in that array's order, which is always insertion order —
+/// unaffected by the integer-key quirk below. This is the recommended shape
+/// whenever route order matters, and `Routes`/`Route` build it this way.
+///
+/// If `routes` is a plain `Object` (the legacy/simple `{ "/a": fn }` shape),
+/// pairs are yielded via `Object::keys`, which is enumeration order per the
+/// JS spec: keys that parse as a canonical array index (e.g. `"0"`, `"23"`,
+/// but not `"01"` or `"-1"`) are visited first in ascending numeric order,
+/// *before* any string keys, regardless of where they were written in the
+/// object literal. Callers whose route patterns could look like array
+/// indices and who care about match order should pass an `Array` instead.
+fn route_entries(routes: &JsValue) -> Vec<(String, JsValue)> {
+	if let Some(arr) = routes.dyn_ref::<Array>() {
+		return arr
+			.iter()
+			.filter_map(|entry| {
+				let pair = entry.dyn_ref::<Array>()?;
+				let pattern = pair.get(0).as_string()?;
+				let handler = pair.get(1);
+				Some((pattern, handler))
+			})
+			.collect();
+	}
+	if routes.is_object()
+		&& let Some(obj) = routes.dyn_ref::<Object>()
+	{
+		return Object::keys(obj)
+			.iter()
+			.filter_map(|key| {
+				let pattern = key.as_string()?;
+				let handler = Reflect::get(routes, &key).ok()?;
+				Some((pattern, handler))
+			})
+			.collect();
+	}
+	Vec::new()
+}
+
 /// `Router({ routes })` matches the current URL against the given path
 /// patterns and provides `{ path, search, params }` via the location context.
+///
+/// `routes` may be a plain `Object` (`{ "/a": fn }`) or an `Array` of
+/// `[pattern, fn]` pairs; see `route_entries` for the tradeoff between the
+/// two when it comes to match order.
 #[wasm_bindgen(js_name = Router)]
 pub fn js_router(props: JsValue) -> JsValue {
 	let routes_obj = Reflect::get(&props, &"routes".into()).unwrap_or(JsValue::NULL);
@@ -140,24 +186,20 @@ pub fn js_router(props: JsValue) -> JsValue {
 		);
 	}
 
-	// Match the current path against the route patterns (object keys).
+	// Match the current path against the route patterns, in the order
+	// `route_entries` yields them (see its doc comment for the Array-vs-Object
+	// ordering guarantee).
 	let mut matched_fn: Option<Function> = None;
 	let mut params: HashMap<String, String> = HashMap::new();
 
-	if routes_obj.is_object()
-		&& let Some(obj) = routes_obj.dyn_ref::<Object>()
-	{
-		for key in Object::keys(obj).iter() {
-			let pattern_str = key.as_string().unwrap_or_default();
-			let pattern = Pattern::compile(&pattern_str);
-			if let Some(p) = pattern.matches(&pathname)
-				&& let Ok(val) = Reflect::get(&routes_obj, &key)
-				&& val.is_function()
-			{
-				matched_fn = val.dyn_into().ok();
-				params = p;
-				break;
-			}
+	for (pattern_str, val) in route_entries(&routes_obj) {
+		let pattern = Pattern::compile(&pattern_str);
+		if let Some(p) = pattern.matches(&pathname)
+			&& val.is_function()
+		{
+			matched_fn = val.dyn_into().ok();
+			params = p;
+			break;
 		}
 	}
 
@@ -196,25 +238,32 @@ pub fn js_link(props: JsValue) -> JsValue {
 		.or_else(|| Reflect::get(&props, &"className".into()).ok().and_then(|v| v.as_string()));
 	let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 
+	// Memoized by `to` so the same `Closure`/`Function` is handed back
+	// across re-renders instead of a fresh one leaking every render (the
+	// same pattern `useNavigate` uses below).
 	let to_for_click = to.clone();
-	let onclick = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
-		if e.default_prevented() || e.button() != 0 || e.meta_key() || e.ctrl_key() {
-			return;
-		}
-		e.prevent_default();
-		let Some(window) = web_sys::window() else {
-			crate::console_warn!("[micro-react] Link: no window available, navigation ignored");
-			return;
-		};
-		let Ok(history) = window.history() else {
-			crate::console_warn!("[micro-react] Link: no history available, navigation ignored");
-			return;
-		};
-		let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to_for_click));
-		window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
-	}) as Box<dyn Fn(web_sys::MouseEvent)>);
-	let onclick_fn: Function = onclick.as_ref().unchecked_ref::<Function>().clone();
-	onclick.forget();
+	let onclick_fn: Function = use_memo(
+		move || {
+			let closure = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+				if e.default_prevented() || e.button() != 0 || e.meta_key() || e.ctrl_key() {
+					return;
+				}
+				e.prevent_default();
+				let Some(window) = web_sys::window() else {
+					crate::console_warn!("[micro-react] Link: no window available, navigation ignored");
+					return;
+				};
+				let Ok(history) = window.history() else {
+					crate::console_warn!("[micro-react] Link: no history available, navigation ignored");
+					return;
+				};
+				let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to_for_click));
+				window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
+			}) as Box<dyn Fn(web_sys::MouseEvent)>);
+			closure.into_js_value().unchecked_into::<Function>()
+		},
+		Some(vec![DepVal(to.clone())]),
+	);
 
 	let mut builder = VNode::tag("a").attr("href", to.as_str()).on("onClick", onclick_fn);
 	if let Some(cn) = class_name {
@@ -467,28 +516,28 @@ pub fn js_use_outlet_context() -> JsValue {
 pub fn js_routes(props: JsValue) -> Result<JsValue, JsValue> {
 	let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 
-	// Built once per `<Routes>` instance (like useNavigate's Closure above):
-	// JSX `element={<X/>}` evaluates eagerly into a one-shot vnode handle,
-	// so it's pulled out of the JS<->wasm bridge exactly once here (see
-	// js_to_vnode's consume-once semantics) and turned into per-pattern
-	// thunks that are memoized instead of rebuilt (and leaked) every render.
-	let routes_obj: Object = use_memo(
-		move || {
-			let table = build_route_table(&children);
-			let obj = Object::new();
-			for entry in table {
-				let pattern = entry.pattern.clone();
-				let thunk = Closure::wrap(Box::new(move || -> JsValue { entry.render() }) as Box<dyn Fn() -> JsValue>);
-				let _ = Reflect::set(&obj, &JsValue::from_str(&pattern), thunk.as_ref());
-				thunk.forget();
-			}
-			obj
-		},
-		Some(Vec::new()),
-	);
+	// Rebuilt on every render (unlike `useNavigate`/`Link`'s closures above,
+	// which are safe to memoize forever by their own stable identity): the
+	// route table's *content* depends on `children`, which can legitimately
+	// differ from one render to the next (e.g. a parent conditionally
+	// including/excluding `<Route>`s), so memoizing this with permanently-
+	// empty deps would silently keep serving the first-mount route table
+	// forever. The per-pattern thunks are still cheap, small closures, so
+	// rebuilding them each render is preferable to serving stale routes.
+	let table = build_route_table(&children);
+	let routes_arr = Array::new();
+	for entry in table {
+		let pattern = entry.pattern.clone();
+		let thunk = Closure::wrap(Box::new(move || -> JsValue { entry.render() }) as Box<dyn Fn() -> JsValue>);
+		let pair = Array::new();
+		pair.push(&JsValue::from_str(&pattern));
+		pair.push(thunk.as_ref());
+		routes_arr.push(&pair);
+		thunk.forget();
+	}
 
 	let router_props = Object::new();
-	Reflect::set(&router_props, &"routes".into(), &routes_obj)?;
+	Reflect::set(&router_props, &"routes".into(), &routes_arr)?;
 	Ok(js_router(router_props.into()))
 }
 
