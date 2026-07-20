@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use wasm_bindgen::{JsCast, prelude::*};
 
-use crate::bindings::{js_to_vnode, vnode_to_js};
+use crate::bindings::{js_to_vnode, js_to_vnode_peek, vnode_to_js};
 use crate::context::Context;
 use crate::hooks::{DepVal, use_effect_nodrop, use_memo, use_state};
 use crate::vnode::{PropVal, VNode, VNodeInner};
@@ -559,7 +559,7 @@ fn js_children_to_vnodes(children: &JsValue) -> Vec<VNode> {
 			a
 		}
 	};
-	arr.iter().filter_map(|c| js_to_vnode(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect()
+	arr.iter().filter_map(|c| js_to_vnode_peek(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect()
 }
 
 /// Recursively walks `<Route>` vnodes, joining `path`s and threading
@@ -577,7 +577,7 @@ fn collect_routes(nodes: &[VNode], parent_path: &str, ancestors: &[VNode], out: 
 		for (k, v) in props {
 			match (k.as_str(), v) {
 				("path", PropVal::Str(s)) => path = Some(s.clone()),
-				("element", PropVal::Js(js)) => element = js_to_vnode(js).ok(),
+				("element", PropVal::Js(js)) => element = js_to_vnode_peek(js).ok(),
 				_ => {}
 			}
 		}

@@ -149,14 +149,41 @@ fn diff_portal(new_vnode: &mut VNode, old_vnode: Option<&VNode>, ns: &str) -> Re
 		VNodeInner::Portal { container, children } => (container.clone(), children.0.clone()),
 		_ => unreachable!(),
 	};
-	let old_children = old_vnode
-		.and_then(|o| match &o.inner {
-			VNodeInner::Portal { children, .. } => Some(children.0.clone()),
-			_ => None,
-		})
-		.unwrap_or_default();
+	let old_portal = old_vnode.and_then(|o| match &o.inner {
+		VNodeInner::Portal { container: old_container, children } => Some((old_container.clone(), children.0.clone())),
+		_ => None,
+	});
 
 	let container_node: Node = container.clone().into();
+
+	// If the portal's target container is the *same* one as last render,
+	// diff_children can reuse/reorder the previous children's DOM nodes in
+	// place as usual. But if it changed, those old children's DOM still
+	// lives under the *old* container, not `container_node` — diff_children
+	// has no notion of that and would use one of their nodes as an
+	// `insertBefore` reference against the new container, which throws
+	// (`NotFoundError: the reference node isn't a child of this node`)
+	// since it was never attached there. Treat a container change as "no
+	// previous children" so every child is freshly mounted into the new
+	// container, and separately tear the old children down (with a real
+	// DOM removal, not `skip_remove`) against the container they actually
+	// live in.
+	let container_changed = old_portal.as_ref().is_some_and(|(old_container, _)| {
+		let old_container_node: Node = old_container.clone().into();
+		!old_container_node.is_same_node(Some(&container_node))
+	});
+
+	let old_children = match &old_portal {
+		Some((_, old_children)) if !container_changed => old_children.clone(),
+		_ => Vec::new(),
+	};
+
+	if container_changed && let Some((_, stale_children)) = &old_portal {
+		for child in stale_children {
+			unmount_vnode(child, false);
+		}
+	}
+
 	let mut new_children = children;
 	diff_children(&container_node, &mut new_children, &old_children, ns, None)?;
 

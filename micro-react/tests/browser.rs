@@ -17,6 +17,10 @@ use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+#[path = "browser/bindings.rs"]
+mod bindings;
+#[path = "browser/bindings_gaps.rs"]
+mod bindings_gaps;
 #[path = "browser/context_unit.rs"]
 mod context_unit;
 #[path = "browser/events_dom.rs"]
@@ -27,12 +31,20 @@ mod events_unit;
 mod hooks_scheduler;
 #[path = "browser/html_template.rs"]
 mod html_template;
+#[path = "browser/portals.rs"]
+mod portals;
 #[path = "browser/reconciler.rs"]
 mod reconciler;
 #[path = "browser/refs_dom.rs"]
 mod refs_dom;
+#[path = "browser/render_root.rs"]
+mod render_root;
 #[path = "browser/router.rs"]
 mod router;
+#[path = "browser/router_gaps.rs"]
+mod router_gaps;
+#[path = "browser/router_gaps2.rs"]
+mod router_gaps2;
 #[path = "browser/vnode_inner_unit.rs"]
 mod vnode_inner_unit;
 #[path = "browser/vnode_unit.rs"]

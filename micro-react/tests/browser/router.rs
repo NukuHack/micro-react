@@ -433,6 +433,72 @@ fn router_props_from(routes: &JsValue) -> JsValue {
 	props.into()
 }
 
+// Mirrors what `Link`/`NavLink`'s onclick handler actually does: push a new
+// history entry, then dispatch a synthetic `popstate` so `Router`'s own
+// listener (registered via `use_effect_nodrop` inside `js_router`) picks up
+// the change and re-renders — *without* the parent ever calling
+// `root.render()` again, so `<Routes>`'s `props.children` is the exact same
+// `JsValue` object across both renders.
+fn navigate_via_popstate(path: &str) {
+	set_path(path);
+	let window = web_sys::window().expect("window should be available");
+	window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).expect("dispatch should succeed");
+}
+
+// ─── Regression: internal navigation must not double-consume Routes' props ───
+//
+// `<Routes>` re-renders itself whenever `Router`'s own `pathname` state
+// changes (e.g. after a `Link`/`NavLink` click triggers `pushState` +
+// `popstate`), *without* its parent supplying a fresh `props` object. Every
+// such re-render used to walk `props.children` with `js_to_vnode`, which
+// takes each JS-side vnode out of the global store — fine the first time,
+// but the *second* render read the exact same `JsValue`s again and found
+// them already removed, logging "already consumed" and silently degrading
+// every `<Route>` (and its `element`) to null. In a real app this manifested
+// as: click a `NavLink`, the URL changes, but the DOM keeps showing whatever
+// was mounted before the click (nothing new is threaded through since the
+// route table came back empty), with all state/hooks on that stale subtree
+// now orphaned as if unmounted.
+//
+// This mounts `<Routes>` and navigates *internally* (not via `root.render`)
+// twice in a row, which is exactly the path that used to hit the bug.
+#[wasm_bindgen_test]
+fn routes_navigates_correctly_across_repeated_internal_rerenders() {
+	set_path("/a");
+	let container = make_container();
+	let route_fn = wrap_as_js_component(js_route, "Route");
+	let routes_fn = wrap_as_js_component(js_routes_as_fn, "Routes");
+
+	let vnode = build_routes_vnode(&route_fn, &routes_fn, &[("/a", "First"), ("/b", "Second")]);
+	let root = micro_react::bindings::render(vnode, container.clone()).expect("initial render should succeed");
+	assert_eq!(container.text_content().as_deref(), Some("First"), "expected the initially matched route to render");
+
+	// First internal navigation: same `<Routes>` instance, same `props`,
+	// re-render driven entirely by Router's own `pathname` state.
+	navigate_via_popstate("/b");
+	flush_rerenders();
+	assert_eq!(
+		container.text_content().as_deref(),
+		Some("Second"),
+		"navigating via popstate should re-match the route table and render \"/b\"'s element, \
+		 not degrade to null/404 from re-reading already-consumed vnodes"
+	);
+
+	// Second internal navigation, proving the fix isn't a one-shot: the
+	// same `props.children` gets read a third time here.
+	navigate_via_popstate("/a");
+	flush_rerenders();
+	assert_eq!(
+		container.text_content().as_deref(),
+		Some("First"),
+		"navigating back via popstate a second time should still correctly re-match and render, \
+		 confirming Routes' config reads survive more than one repeat"
+	);
+
+	root.unmount();
+	container.remove();
+}
+
 // The positive case: an `Array` of `[pattern, fn]` pairs is matched in
 // exactly the order given, even though one pattern ("1") looks like a JS
 // array index and would normally be hoisted ahead of a non-index pattern

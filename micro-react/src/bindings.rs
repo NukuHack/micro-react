@@ -85,6 +85,16 @@ fn take_vnode(id: u64) -> Option<VNode> {
 	VNODE_STORE.with(|s| s.borrow_mut().remove(&id))
 }
 
+/// Clone the vnode for `id` without removing it from the store. Unlike
+/// `take_vnode`, safe to call any number of times for the same id — for
+/// JS-side values that are legitimately inspected across multiple renders
+/// (e.g. route config sitting in a `props` object that outlives a single
+/// render, re-read whenever internal state re-renders the component) rather
+/// than consumed exactly once as normal render output.
+fn peek_vnode(id: u64) -> Option<VNode> {
+	VNODE_STORE.with(|s| s.borrow().get(&id).cloned())
+}
+
 /// Safely turn an arbitrary thrown JS value into a `String`. Goes through
 /// `as_string()`/`.message` first since wasm-bindgen's `JsString::from`
 /// unchecked-converts and can panic later on a non-string throw.
@@ -757,6 +767,57 @@ pub(crate) fn js_to_vnode(v: &JsValue) -> Result<VNode, JsValue> {
 				"[micro-react] vnode id {} was already consumed or is unknown \
                  (the same rendered value was read more than once). Returning \
                  a null vnode instead of reusing/double-freeing it.",
+				id
+			);
+			VNode::null()
+		}));
+	}
+
+	Ok(VNode::null())
+}
+
+/// Same conversion as `js_to_vnode`, but for callers that may legitimately
+/// inspect the same JS vnode wrapper more than once (e.g. reading `<Route
+/// element={...}>` out of `props` on every re-render of `<Routes>`, where
+/// `props` itself doesn't change even though the component re-renders).
+/// Clones the stored vnode instead of removing it, so repeat reads keep
+/// working instead of degrading to null after the first one.
+pub(crate) fn js_to_vnode_peek(v: &JsValue) -> Result<VNode, JsValue> {
+	if v.is_null() || v.is_undefined() {
+		return Ok(VNode::null());
+	}
+	if let Some(s) = v.as_string() {
+		return Ok(VNode::text(s));
+	}
+	if let Some(n) = v.as_f64() {
+		return Ok(VNode::text(n.to_string()));
+	}
+	if v.as_bool().is_some() {
+		return Ok(VNode::null());
+	}
+
+	if let Ok(arr) = v.clone().dyn_into::<Array>() {
+		let children: Vec<VNode> = arr.iter().filter_map(|c| js_to_vnode_peek(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect();
+		return Ok(VNode::fragment(children));
+	}
+
+	if !v.is_object() {
+		return Ok(VNode::null());
+	}
+
+	let marker = Reflect::get(v, &"__mrVNode".into())?;
+	if !marker.is_truthy() {
+		return Ok(VNode::null());
+	}
+
+	let id_val = Reflect::get(v, &"__id".into())?;
+	if let Some(n) = id_val.as_f64() {
+		let id = n as u64;
+		return Ok(peek_vnode(id).unwrap_or_else(|| {
+			crate::console_error!(
+				"[micro-react] vnode id {} is unknown while peeking \
+                 (never stored, or already dropped from the store entirely). \
+                 Returning a null vnode.",
 				id
 			);
 			VNode::null()

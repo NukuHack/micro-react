@@ -203,6 +203,14 @@ impl VNode {
 		VNode::new(VNodeInner::Fragment { children: Children(children), key: Some(key.into()) })
 	}
 
+	/// Render `children` into a different DOM `container` than the one the
+	/// portal vnode itself sits in. No JS-facing binding constructs this
+	/// yet (see `bindings.rs`'s `create_element`), so Rust callers/tests
+	/// build it directly via this constructor.
+	pub fn portal(container: Element, children: Vec<VNode>) -> Self {
+		VNode::new(VNodeInner::Portal { container, children: Children(children) })
+	}
+
 	pub fn component(name: impl Into<String>, render: ComponentFn, props: Props) -> Self {
 		VNode::new(VNodeInner::Component { name: name.into(), render, props, children: Vec::new(), key: None, inst: ComponentInstSlot::new() })
 	}
