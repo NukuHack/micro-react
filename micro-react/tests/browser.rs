@@ -21,6 +21,10 @@ wasm_bindgen_test_configure!(run_in_browser);
 mod bindings;
 #[path = "browser/bindings_gaps.rs"]
 mod bindings_gaps;
+#[path = "browser/bindings_gaps2.rs"]
+mod bindings_gaps2;
+#[path = "browser/bindings_gaps3.rs"]
+mod bindings_gaps3;
 #[path = "browser/context_unit.rs"]
 mod context_unit;
 #[path = "browser/events_dom.rs"]

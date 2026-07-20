@@ -9,12 +9,7 @@ read md before any modification do not run or compile the code, only unzip
 
 ## Test coverage gaps
 
-- **`src/bindings.rs`**: `tests/browser/bindings.rs` and `tests/browser/bindings_gaps.rs` now cover most of the JsValue-marshalling layer (key coercion, ref shapes, state/reducer/memo/callback/id hooks through JS, context Provider/useContext shape, the `memo` double-free regression). Still open:
-  - `js_use_effect`/`js_use_layout_effect` as called *from JS values* specifically (the underlying Rust hooks are covered in `tests/browser/hooks_scheduler.rs`, but not the `&Function`/cleanup marshalling layer on top).
-  - `record_create_context_call`'s leak-count warning firing on the 2nd+ call (needs a console-spy hook the suite doesn't have yet).
-  - `js_create_error_boundary`/`js_create_error_boundary_inner`: the re-entrancy guard (`in_progress`) blocking a nested synchronous re-entrant call, and `ResetOnDrop` clearing the guard after a panic.
-  - `js_to_vnode`/`vnode_to_js`/`children_to_js`/`js_val_to_prop_val`/`props_to_js_object`: round-tripping every `PropVal` variant, array-as-fragment, and the `__mrVNode`/`__id` marker protocol directly (as opposed to incidentally, via every other test that renders something).
-- **`src/scan.rs`** (`scan_tag_name_end`, `skip_js_string`, `skip_js_comment`, `find_matching_brace`) still has no dedicated unit-test file; it's only exercised indirectly through `jsx_test.rs`'s higher-level transpile assertions. Edge cases worth pinning down directly: unterminated strings/comments (should return `None`, not panic or scan past the end), nested braces inside a JS string literal inside a `{}` hole, and block vs. line comments abutting a tag boundary.
+nothing as far as i know
 
 ## Plans for extension
 
@@ -27,6 +22,10 @@ Things real React (or React Router) has that this project currently doesn't — 
 - No `StrictMode`-style double-invoke-to-catch-impure-renders dev aid.
 - `Link`'s `target`/`rel` handling isn't there — real `Link`/`NavLink` skip client-side navigation when `target !== "_self"` (e.g. `target="_blank"`); this implementation's `js_link` onclick doesn't check `target` at all, so a `<Link target="_blank">` would still hijack the click.
 - No `<Link state={...}>` / `history.state` passthrough — `js_link`/`js_navigate` always push with `JsValue::NULL` as state, so `useLocation()`'s consumers can't receive router-passed state the way `location.state` does in react-router.
+
+useImperativeHandle
+
+{/* comment */} - rn it throws : "Uncaught SyntaxError: expected expression, got '}'"
 
 ## Design/soundness notes
 

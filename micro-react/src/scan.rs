@@ -362,6 +362,30 @@ mod tests {
 		let chars: Vec<char> = "a / b".chars().collect();
 		assert_eq!(skip_js_comment(&chars, 2), None);
 	}
+
+	#[test]
+	fn skip_js_comment_line_comment_directly_abutting_tag() {
+		// No space between the comment's end and the following `<tag>`.
+		let chars: Vec<char> = "// note\n<div>".chars().collect();
+		let end = skip_js_comment(&chars, 0).expect("should find end of line comment");
+		assert_eq!(chars[end], '\n');
+		let tag_start = end + 1;
+		assert_eq!(chars[tag_start], '<');
+		let name_end = scan_tag_name_end(&chars, tag_start + 1);
+		let name: String = chars[tag_start + 1..name_end].iter().collect();
+		assert_eq!(name, "div");
+	}
+
+	#[test]
+	fn skip_js_comment_block_comment_directly_abutting_tag() {
+		// No space between the `*/` and the following `<tag>`.
+		let chars: Vec<char> = "/* note */<span>".chars().collect();
+		let end = skip_js_comment(&chars, 0).expect("should find end of block comment");
+		assert_eq!(chars[end], '<');
+		let name_end = scan_tag_name_end(&chars, end + 1);
+		let name: String = chars[end + 1..name_end].iter().collect();
+		assert_eq!(name, "span");
+	}
 }
 
 #[cfg(test)]

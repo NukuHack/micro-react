@@ -976,6 +976,132 @@ mod vnode_store_tests {
 	}
 }
 
+// ─── Tests for the VNode↔JS conversion helpers (marker protocol, prop-value
+// mapping, array-as-fragment). `pub(crate)`, so these live here rather than
+// in `tests/`, where they'd be unreachable across the crate boundary. Needs
+// real `JsValue`s, so runs under `wasm-bindgen-test`, not plain `cargo test`.
+#[cfg(test)]
+mod conversion_tests {
+	use super::*;
+	use crate::vnode::VNodeInner;
+	use wasm_bindgen_test::*;
+
+	wasm_bindgen_test_configure!(run_in_browser);
+
+	#[wasm_bindgen_test]
+	fn js_to_vnode_null_and_undefined_become_null_vnode() {
+		assert!(matches!(js_to_vnode(&JsValue::NULL).unwrap().inner, VNodeInner::Null));
+		assert!(matches!(js_to_vnode(&JsValue::UNDEFINED).unwrap().inner, VNodeInner::Null));
+	}
+
+	#[wasm_bindgen_test]
+	fn js_to_vnode_string_and_number_become_text() {
+		match js_to_vnode(&JsValue::from_str("hi")).unwrap().inner {
+			VNodeInner::Text(s) => assert_eq!(s, "hi"),
+			_ => panic!("expected text vnode"),
+		}
+		match js_to_vnode(&JsValue::from_f64(42.0)).unwrap().inner {
+			VNodeInner::Text(s) => assert_eq!(s, "42"),
+			_ => panic!("expected text vnode for a number child"),
+		}
+	}
+
+	#[wasm_bindgen_test]
+	fn js_to_vnode_bool_becomes_null_like_react_conditional_rendering() {
+		// `{cond && <X/>}` yields `false` when cond is falsy; React (and
+		// this project) renders that as nothing, not the literal text "false".
+		assert!(matches!(js_to_vnode(&JsValue::from_bool(false)).unwrap().inner, VNodeInner::Null));
+		assert!(matches!(js_to_vnode(&JsValue::from_bool(true)).unwrap().inner, VNodeInner::Null));
+	}
+
+	#[wasm_bindgen_test]
+	fn js_to_vnode_array_becomes_a_fragment_dropping_null_entries() {
+		let arr = Array::new();
+		arr.push(&JsValue::from_str("a"));
+		arr.push(&JsValue::NULL);
+		arr.push(&JsValue::from_str("b"));
+		match js_to_vnode(&arr.into()).unwrap().inner {
+			VNodeInner::Fragment { children, .. } => {
+				assert_eq!(children.len(), 2, "the null entry should be filtered out of the fragment's children");
+			}
+			other => panic!("expected a fragment, got {other:?}"),
+		}
+	}
+
+	#[wasm_bindgen_test]
+	fn js_to_vnode_rejects_objects_without_the_marker() {
+		let plain = Object::new();
+		assert!(
+			matches!(js_to_vnode(&plain.into()).unwrap().inner, VNodeInner::Null),
+			"a plain object without __mrVNode must not be mistaken for a vnode wrapper"
+		);
+	}
+
+	#[wasm_bindgen_test]
+	fn vnode_to_js_round_trips_through_js_to_vnode() {
+		let original = VNode::text("round trip");
+		let js = vnode_to_js(original).expect("vnode_to_js should succeed");
+
+		// The marker protocol: a stored vnode is a plain object tagged
+		// __mrVNode: true with an __id pointing into the slot map.
+		let marker = Reflect::get(&js, &"__mrVNode".into()).unwrap();
+		assert!(marker.is_truthy(), "vnode_to_js should tag its wrapper with __mrVNode");
+		assert!(Reflect::get(&js, &"__id".into()).unwrap().as_f64().is_some(), "vnode_to_js should tag its wrapper with a numeric __id");
+
+		match js_to_vnode(&js).unwrap().inner {
+			VNodeInner::Text(s) => assert_eq!(s, "round trip"),
+			_ => panic!("expected the round-tripped vnode to still be the original text vnode"),
+		}
+	}
+
+	#[wasm_bindgen_test]
+	fn children_to_js_unwraps_a_single_child_but_arrays_multiple() {
+		let one = children_to_js(&[VNode::text("solo")]);
+		assert!(!one.is_array(), "a single child should be handed back as one wrapper object, not a one-element array");
+
+		let many = children_to_js(&[VNode::text("a"), VNode::text("b")]);
+		let arr: Array = many.dyn_into().expect("multiple children should be an array");
+		assert_eq!(arr.length(), 2);
+	}
+
+	#[wasm_bindgen_test]
+	fn js_val_to_prop_val_covers_every_variant() {
+		assert_eq!(js_val_to_prop_val(&JsValue::NULL), PropVal::Null);
+		assert_eq!(js_val_to_prop_val(&JsValue::UNDEFINED), PropVal::Null);
+		assert_eq!(js_val_to_prop_val(&JsValue::from_bool(true)), PropVal::Bool(true));
+		assert_eq!(js_val_to_prop_val(&JsValue::from_f64(3.5)), PropVal::Num(3.5));
+		assert_eq!(js_val_to_prop_val(&JsValue::from_str("s")), PropVal::Str("s".to_string()));
+
+		let f: Function = Closure::wrap(Box::new(|| {}) as Box<dyn Fn()>).into_js_value().unchecked_into();
+		match js_val_to_prop_val(&f.clone().into()) {
+			PropVal::Callback(cb) => assert!(js_sys::Object::is(cb.as_ref(), f.as_ref())),
+			other => panic!("expected a Callback PropVal, got {other:?}"),
+		}
+
+		let style = Object::new();
+		let _ = Reflect::set(&style, &"color".into(), &"red".into());
+		match js_val_to_prop_val(&style.clone().into()) {
+			PropVal::Js(v) => assert!(js_sys::Object::is(&v, &style.into())),
+			other => panic!("expected a Js PropVal for a plain object, got {other:?}"),
+		}
+	}
+
+	#[wasm_bindgen_test]
+	fn props_to_js_object_is_the_inverse_of_js_val_to_prop_val() {
+		let props: Props = vec![
+			("label".to_string(), PropVal::Str("hi".to_string())),
+			("count".to_string(), PropVal::Num(3.0)),
+			("on".to_string(), PropVal::Bool(true)),
+			("missing".to_string(), PropVal::Null),
+		];
+		let js = props_to_js_object(&props);
+		assert_eq!(Reflect::get(&js, &"label".into()).unwrap().as_string().as_deref(), Some("hi"));
+		assert_eq!(Reflect::get(&js, &"count".into()).unwrap().as_f64(), Some(3.0));
+		assert_eq!(Reflect::get(&js, &"on".into()).unwrap().as_bool(), Some(true));
+		assert!(Reflect::get(&js, &"missing".into()).unwrap().is_null());
+	}
+}
+
 /// Convert a JS deps array (or undefined) to a Rust dep vec.
 fn js_deps_to_rust(deps: &JsValue) -> Option<Vec<DepVal>> {
 	if deps.is_undefined() || deps.is_null() {
