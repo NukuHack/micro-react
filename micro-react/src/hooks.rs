@@ -210,6 +210,24 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 	true
 }
 
+/// Hand a value directly to the boundary *above* `inst` (not `inst` itself),
+/// using `inst`'s own persisted `nearest_boundary` as the starting point.
+///
+/// This is for a boundary-like component (e.g. Suspense) that has decided,
+/// after inspecting a value handed to its own `error_setter`, that the value
+/// isn't one it wants to handle itself (a real error, not a pending promise)
+/// and needs to keep propagating upward exactly like an uncaught throw would
+/// — but starting the search one level above `inst`, since `inst` is the one
+/// declining it. Returns true if some ancestor boundary accepted it.
+pub fn forward_to_ancestor_boundary(inst: &Rc<RefCell<ComponentInst>>, err: JsValue) -> bool {
+	let Some(target) = inst.borrow().nearest_boundary.clone().and_then(|w| w.upgrade()) else { return false };
+	let Some(setter) = target.borrow().error_setter.clone() else { return false };
+	setter(err);
+	crate::diff::rerender_component(target);
+	BOUNDARY_ABSORBED.with(|f| *f.borrow_mut() = true);
+	true
+}
+
 // ─── helper: get &hooks safely through raw ptr ───
 // SAFETY: WASM is single-threaded; inst is valid for the duration of a render.
 macro_rules! hooks_ref {

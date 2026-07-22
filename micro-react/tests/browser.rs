@@ -35,6 +35,10 @@ mod events_unit;
 mod hooks_scheduler;
 #[path = "browser/html_template.rs"]
 mod html_template;
+#[path = "browser/imperative_handle_and_suspense.rs"]
+mod imperative_handle_and_suspense;
+#[path = "browser/module_loading.rs"]
+mod module_loading;
 #[path = "browser/portals.rs"]
 mod portals;
 #[path = "browser/reconciler.rs"]

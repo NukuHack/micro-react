@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::Element;
 
 use crate::context::use_context;
-use crate::hooks::{DepVal, current_inst, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell};
+use crate::hooks::{DepVal, current_inst, current_weak, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell};
 use crate::render::Root;
 use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode, VNodeInner};
 
@@ -433,6 +433,50 @@ pub fn js_use_ref(initial: JsValue) -> Object {
 	cell.borrow().downcast_ref::<JsValue>().cloned().unwrap_or(JsValue::UNDEFINED).dyn_into::<Object>().unwrap_or_else(|_| Object::new())
 }
 
+/// `useImperativeHandle(ref, createHandle, deps?)` — lets a `forwardRef`
+/// component (see `js_forward_ref` below) override what the caller's `ref`
+/// ends up pointing at, instead of the default of "whatever `NodeRef` this
+/// component attaches to a host element". Runs as a layout effect so the
+/// handle is (re)installed synchronously after DOM updates, mirroring when
+/// an ordinary `ref` callback fires; the cleanup nulls it back out on
+/// unmount or before the next handle is installed, matching a real ref's
+/// teardown semantics.
+#[wasm_bindgen(js_name = useImperativeHandle)]
+pub fn js_use_imperative_handle(ref_val: JsValue, create_handle: &Function, deps: JsValue) {
+	let create_handle = create_handle.clone();
+	let rust_deps = js_deps_to_rust(&deps);
+	use_layout_effect(
+		move || {
+			let handle = create_handle.call0(&JsValue::NULL).unwrap_or(JsValue::UNDEFINED);
+			write_ref_value(&ref_val, &handle);
+			let ref_val_cleanup = ref_val.clone();
+			Box::new(move || {
+				write_ref_value(&ref_val_cleanup, &JsValue::NULL);
+			}) as Box<dyn FnOnce()>
+		},
+		rust_deps,
+	);
+}
+
+/// Write `value` into a raw JS `ref` (callback function or `{ current }`
+/// object), the same two shapes `js_ref_to_node_ref` accepts — but writing
+/// an arbitrary handle value instead of always a DOM node, and doing it
+/// immediately rather than through `NodeRef`'s DOM-mount-driven `sync`.
+fn write_ref_value(ref_val: &JsValue, value: &JsValue) {
+	if ref_val.is_null() || ref_val.is_undefined() {
+		return;
+	}
+	if ref_val.is_function()
+		&& let Ok(f) = ref_val.clone().dyn_into::<Function>()
+	{
+		let _ = f.call1(&JsValue::NULL, value);
+		return;
+	}
+	if ref_val.is_object() {
+		let _ = Reflect::set(ref_val, &"current".into(), value);
+	}
+}
+
 /// `useMemo(factory, deps)` — returns a memoised value.
 #[wasm_bindgen(js_name = useMemo)]
 pub fn js_use_memo(factory: &Function, deps: JsValue) -> JsValue {
@@ -707,18 +751,119 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 	Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
 }
 
+// ─── Suspense component factory ───
+
+/// True if `v` is a thenable (an object with a callable `.then`) — the
+/// convention a component uses to "suspend" (throw a pending promise rather
+/// than a real error) so `Suspense` knows to render its fallback and retry
+/// once the promise settles, instead of treating it as an uncaught error.
+fn is_thenable(v: &JsValue) -> bool {
+	if !v.is_object() {
+		return false;
+	}
+	Reflect::get(v, &"then".into()).map(|t| t.is_function()).unwrap_or(false)
+}
+
+/// Returns a JS function component that acts as a suspense boundary.
+/// Usage: `createElement(Suspense, { fallback: <Spinner /> }, children)`.
+///
+/// A descendant "suspends" by throwing a thenable (e.g. a pending fetch
+/// promise) instead of a value/Error. That reaches this component through
+/// the exact same `error_setter`/boundary machinery `ErrorBoundary` uses
+/// (see `js_create_error_boundary_inner`) — the two are otherwise
+/// indistinguishable to the reconciler. This component tells them apart:
+/// a thenable renders `fallback` and re-renders once it settles; anything
+/// else is a real error and is forwarded past this component to whatever
+/// `ErrorBoundary` sits above it, since Suspense (like React's) doesn't
+/// catch errors, only pending async work.
+#[wasm_bindgen(js_name = createSuspense)]
+pub fn js_create_suspense() -> JsValue {
+	// Same re-entrancy guard as createErrorBoundary: js_use_state can trigger
+	// a synchronous re-render that re-invokes this closure before the first
+	// call returns.
+	let in_progress = Rc::new(RefCell::new(false));
+
+	struct ResetOnDrop(Rc<RefCell<bool>>);
+	impl Drop for ResetOnDrop {
+		fn drop(&mut self) {
+			*self.0.borrow_mut() = false;
+		}
+	}
+
+	let suspense_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
+		if *in_progress.borrow() {
+			return JsValue::NULL;
+		}
+		*in_progress.borrow_mut() = true;
+		let _reset = ResetOnDrop(in_progress.clone());
+		js_create_suspense_inner(props)
+	}) as Box<dyn Fn(JsValue) -> JsValue>);
+
+	suspense_fn.into_js_value()
+}
+
+fn js_create_suspense_inner(props: JsValue) -> JsValue {
+	let arr = js_use_state(JsValue::NULL);
+	let caught: JsValue = arr.get(0);
+	let set_caught: JsValue = arr.get(1);
+
+	{
+		let inst_ptr = current_inst();
+		let inst_weak = current_weak();
+		let setter_fn = set_caught.clone();
+		let rc_setter: Rc<dyn Fn(JsValue)> = Rc::new(move |value: JsValue| {
+			if is_thenable(&value) {
+				if let Some(f) = setter_fn.dyn_ref::<Function>() {
+					let _ = f.call1(&JsValue::NULL, &value);
+				}
+				// Retry (clear the pending state) once the promise settles,
+				// whether it resolves or rejects — a still-failing child
+				// will just suspend or throw again on the retry.
+				if let Ok(then_fn) = Reflect::get(&value, &"then".into()).and_then(|t| t.dyn_into::<Function>()) {
+					let f2 = setter_fn.clone();
+					let retry = Closure::once_into_js(move |_: JsValue| {
+						if let Some(sf) = f2.dyn_ref::<Function>() {
+							let _ = sf.call1(&JsValue::NULL, &JsValue::NULL);
+						}
+					});
+					let _ = then_fn.call2(&value, &retry, &retry);
+				}
+			} else if let Some(inst_rc) = inst_weak.upgrade() {
+				// Not a suspend signal — a real error. Suspense doesn't
+				// catch errors itself, so hand it to whatever ErrorBoundary
+				// sits above this Suspense instead.
+				if !crate::hooks::forward_to_ancestor_boundary(&inst_rc, value.clone()) {
+					crate::console_error!("[micro-react] uncaught error past Suspense (no ErrorBoundary above): {}", stringify_thrown(&value));
+				}
+			}
+		});
+		// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
+		unsafe {
+			(*inst_ptr).error_setter = Some(rc_setter);
+		}
+	}
+
+	if is_thenable(&caught) {
+		return Reflect::get(&props, &"fallback".into()).unwrap_or(JsValue::NULL);
+	}
+
+	Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
+}
+
 // ─── Boot convenience: bundle the non-standard exports ───
 
 /// Bundles the values that aren't plain `wasm-bindgen` exports (`Fragment`
-/// is a `Symbol`, `ErrorBoundary` a stateful `Closure`) into one object, so
-/// callers get both from a single call right after module init instead of
-/// deriving each by hand. `getFragment`/`createErrorBoundary` stay exported
-/// too, for callers who want a fresh, independent `ErrorBoundary` instance.
+/// is a `Symbol`, `ErrorBoundary`/`Suspense` are stateful `Closure`s) into
+/// one object, so callers get all three from a single call right after
+/// module init instead of deriving each by hand. `getFragment`/
+/// `createErrorBoundary`/`createSuspense` stay exported too, for callers who
+/// want a fresh, independent instance of either boundary.
 #[wasm_bindgen(js_name = createExtras)]
 pub fn js_create_extras() -> Result<JsValue, JsValue> {
 	let obj = Object::new();
 	Reflect::set(&obj, &"Fragment".into(), &get_fragment())?;
 	Reflect::set(&obj, &"ErrorBoundary".into(), &js_create_error_boundary())?;
+	Reflect::set(&obj, &"Suspense".into(), &js_create_suspense())?;
 	Ok(obj.into())
 }
 

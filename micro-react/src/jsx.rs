@@ -128,6 +128,28 @@ fn render_jsx_attrs(chars: &[char], from: usize) -> Result<(String, usize, bool)
 	Err(JsxError::UnterminatedTag(from))
 }
 
+/// True if a JSX `{...}` hole's inner text is nothing but whitespace and JS
+/// comments, as in `{/* comment */}`. Real JSX treats such holes as valid
+/// children that render nothing; naively splicing them into an `` html`` ``
+/// template as `${/* comment */}` produces an empty template expression,
+/// which is a JS syntax error, so these holes must be dropped entirely.
+fn is_comment_only_hole(inner: &str) -> bool {
+	let chars: Vec<char> = inner.chars().collect();
+	let n = chars.len();
+	let mut i = 0;
+	while i < n {
+		if chars[i].is_whitespace() {
+			i += 1;
+			continue;
+		}
+		match skip_js_comment(&chars, i) {
+			Some(next) => i = next,
+			None => return false,
+		}
+	}
+	true
+}
+
 /// Renders JSX children (`from` is just after the opening tag's `>`) up to
 /// and including the matching closing tag, recursing into nested elements
 /// and converting `{expr}` holes into `${expr}` along the way.
@@ -142,9 +164,11 @@ fn parse_children(chars: &[char], from: usize, tag_name: &str, is_fragment: bool
 		if c == '{' {
 			let close = find_matching_brace(chars, i).ok_or(JsxError::UnbalancedHole(i))?;
 			let inner: String = chars[i + 1..close].iter().collect();
-			out.push_str("${");
-			out.push_str(&transpile_jsx_str(&inner)?);
-			out.push('}');
+			if !is_comment_only_hole(&inner) {
+				out.push_str("${");
+				out.push_str(&transpile_jsx_str(&inner)?);
+				out.push('}');
+			}
 			i = close + 1;
 			continue;
 		}
@@ -298,6 +322,14 @@ thread_local! {
 struct JsxModuleRecord {
 	exports: JsValue,
 	is_loading: bool,
+	/// The in-flight (or already-settled) load's own promise. True circular
+	/// imports still grab `exports` directly without awaiting (see
+	/// `is_circular` in `load_module_body`) to break the deadlock, but a
+	/// merely concurrent, non-circular import of the same URL awaits this
+	/// instead of polling `is_loading` — which correctly propagates a
+	/// rejection if the real load fails, rather than waiting forever for a
+	/// flag that a failed load will never flip.
+	promise: js_sys::Promise,
 }
 
 /// Extensions tried, in order, for an extensionless import specifier —
@@ -387,6 +419,33 @@ fn inject_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue
 /// Recursively loads, transpiles, and executes a JSX module in the browser.
 #[wasm_bindgen(js_name = loadJsx)]
 pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsValue, JsValue> {
+	load_jsx_module_impl(url, base_url, Vec::new()).await
+}
+
+/// Waits for a module that's already loading elsewhere (a concurrent,
+/// non-circular "diamond" import — e.g. two sibling modules resolved in
+/// parallel by the same `Promise.all` both importing the same dependency)
+/// to actually finish, by awaiting the exact same promise the real loader
+/// is awaiting. This resolves the instant the real load does (there's no
+/// polling delay), and — critically — rejects if the real load fails,
+/// instead of waiting forever for a completion flag that a failed load
+/// would never set.
+async fn wait_for_module(child_url: &str) -> Result<JsValue, JsValue> {
+	let promise = MODULE_CACHE.with(|cache| cache.borrow().get(child_url).map(|rec| rec.promise.clone()));
+	match promise {
+		Some(promise) => JsFuture::from(promise).await,
+		None => Err(JsValue::from_str(&format!("module '{child_url}' is no longer loading (its load likely already failed and was cleared)"))),
+	}
+}
+
+/// Real body of [`load_jsx_module`]. `ancestors` is the chain of absolute
+/// URLs currently being loaded further up this particular import branch —
+/// used to tell a genuine circular import (child is its own ancestor, so it
+/// must get the pre-allocated `exports` reference to break the deadlock)
+/// apart from a merely concurrent one (child is loading because a sibling
+/// branch also depends on it, so it's correct — and necessary, to avoid
+/// reading its exports before they're populated — to just await its promise).
+async fn load_jsx_module_impl(url: &str, base_url: Option<String>, ancestors: Vec<String>) -> Result<JsValue, JsValue> {
 	let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
 
 	// 1. Resolve relative paths to absolute URLs
@@ -398,19 +457,62 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	};
 
 	// 2. Handle caching & break circular dependency deadlocks
-	let cached_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&absolute_url).map(|rec| rec.exports.clone()));
+	let cached_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&absolute_url).filter(|rec| !rec.is_loading).map(|rec| rec.exports.clone()));
 	if let Some(exports) = cached_exports {
 		return Ok(exports);
 	}
 
 	// Pre-allocate the exports object. Circular imports will get this exact reference instantly.
 	let exports = js_sys::Object::new();
-	MODULE_CACHE.with(|cache| {
-		cache.borrow_mut().insert(absolute_url.clone(), JsxModuleRecord { exports: exports.clone().into(), is_loading: true });
+
+	let window_for_body = window.clone();
+	let absolute_url_for_body = absolute_url.clone();
+	let exports_for_body = exports.clone();
+	let promise = wasm_bindgen_futures::future_to_promise(async move {
+		load_module_body(&window_for_body, &absolute_url_for_body, &exports_for_body, ancestors).await
 	});
 
+	MODULE_CACHE.with(|cache| {
+		cache
+			.borrow_mut()
+			.insert(absolute_url.clone(), JsxModuleRecord { exports: exports.clone().into(), is_loading: true, promise: promise.clone() });
+	});
+
+	let result = JsFuture::from(promise).await;
+
+	MODULE_CACHE.with(|cache| {
+		let mut cache = cache.borrow_mut();
+		match &result {
+			// Success: flip the placeholder live so anyone waiting on it (or
+			// checking it for a future circular import) sees the real exports.
+			Ok(_) => {
+				if let Some(rec) = cache.get_mut(&absolute_url) {
+					rec.is_loading = false;
+				}
+			}
+			// Failure: drop the placeholder entirely, so a later fresh import
+			// of the same URL retries instead of reusing a dead entry.
+			Err(_) => {
+				cache.remove(&absolute_url);
+			}
+		}
+	});
+
+	result
+}
+
+/// Fetches, prepares, resolves dependencies for, transpiles, and executes
+/// a module's body. Split out from `load_jsx_module_impl` purely so the
+/// caller can uniformly clean up the module cache on any failure here,
+/// regardless of which step produced it.
+async fn load_module_body(
+	window: &web_sys::Window,
+	absolute_url: &str,
+	exports: &js_sys::Object,
+	ancestors: Vec<String>,
+) -> Result<JsValue, JsValue> {
 	// 3. Fetch the raw JSX file, guessing an extension if the bare specifier 404s.
-	let (resp, resolved_url) = fetch_resolving_extension(&window, &absolute_url).await?;
+	let (resp, resolved_url) = fetch_resolving_extension(window, absolute_url).await?;
 	if !resp.ok() {
 		return Err(JsValue::from_str(&format!(
 			"Failed to fetch JSX from '{}' (also tried {}): {} {}",
@@ -430,7 +532,7 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	let promises = js_sys::Array::new();
 	for spec in specifiers {
 		let from = spec.from.clone();
-		let absolute_url_clone = absolute_url.clone();
+		let absolute_url_clone = absolute_url.to_string();
 		let default_name = spec.default_name.clone();
 		let namespace_name = spec.namespace_name.clone();
 		let named = spec.named.clone();
@@ -452,7 +554,7 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 			let is_bare_import = default_name.is_none() && namespace_name.is_none() && named.is_empty();
 			let child_exports = js_sys::Object::new();
 			if is_bare_import {
-				inject_stylesheet(&window, &child_url)?;
+				inject_stylesheet(window, &child_url)?;
 			} else {
 				js_sys::Reflect::set(&child_exports, &"default".into(), &JsValue::from_str(&child_url))?;
 			}
@@ -466,7 +568,9 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 			continue;
 		}
 
-		let is_circular = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).is_some_and(|rec| rec.is_loading));
+		let is_loading = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).is_some_and(|rec| rec.is_loading));
+		let is_circular = is_loading && ancestors.contains(&child_url);
+		let is_concurrent_diamond = is_loading && !is_circular;
 
 		if is_circular {
 			// Break the deadlock! Grab the pre-allocated reference without awaiting
@@ -486,10 +590,34 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 			js_sys::Reflect::set(&result_obj, &"named".into(), &js_named)?;
 
 			promises.push(&js_sys::Promise::resolve(&result_obj));
+		} else if is_concurrent_diamond {
+			// Not a cycle — some sibling branch just happens to be loading
+			// the same module right now. Wait for it to actually finish
+			// instead of grabbing its still-empty exports early.
+			let fut = async move {
+				let child_exports = wait_for_module(&child_url).await?;
+				let result_obj = js_sys::Object::new();
+				js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
+				js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
+				js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
+
+				let js_named = js_sys::Array::new();
+				for (local, exported) in named {
+					let pair = js_sys::Array::new();
+					pair.push(&JsValue::from_str(&local));
+					pair.push(&JsValue::from_str(&exported));
+					js_named.push(&pair);
+				}
+				js_sys::Reflect::set(&result_obj, &"named".into(), &js_named)?;
+				Ok(result_obj.into())
+			};
+			promises.push(&wasm_bindgen_futures::future_to_promise(fut));
 		} else {
 			// Spawn standard Rust async future to fetch the child module
+			let mut child_ancestors = ancestors.clone();
+			child_ancestors.push(absolute_url.to_string());
 			let fut = async move {
-				let child_exports = load_jsx_module(&from, Some(absolute_url_clone)).await?;
+				let child_exports = load_jsx_module_impl(&from, Some(absolute_url_clone), child_ancestors).await?;
 				let result_obj = js_sys::Object::new();
 				js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
 				js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
@@ -560,7 +688,7 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	let func: js_sys::Function = ASYNC_FUNCTION_CTOR.with(|ctor| js_sys::Reflect::construct(ctor, &args))?.dyn_into()?;
 
 	let call_args = js_sys::Array::new();
-	call_args.push(&exports);
+	call_args.push(exports);
 	for val in param_values.iter() {
 		call_args.push(&val);
 	}
@@ -572,12 +700,5 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	let promise: js_sys::Promise = result.dyn_into()?;
 	JsFuture::from(promise).await?;
 
-	// Mark loading as complete in our cache
-	MODULE_CACHE.with(|cache| {
-		if let Some(rec) = cache.borrow_mut().get_mut(&absolute_url) {
-			rec.is_loading = false;
-		}
-	});
-
-	Ok(exports.into())
+	Ok(exports.clone().into())
 }
