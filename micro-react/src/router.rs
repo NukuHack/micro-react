@@ -223,9 +223,10 @@ pub fn js_router(props: JsValue) -> JsValue {
 	}
 }
 
-/// `Link({ to, class/className, children })` — an anchor that performs
-/// client-side navigation via `history.pushState` + a synthetic `popstate`
-/// event.
+/// `Link({ to, class/className, target, rel, children })` — an anchor that
+/// performs client-side navigation via `history.pushState` + a synthetic
+/// `popstate` event. A `target` other than `"_self"` (e.g. `"_blank"`) opts
+/// out of client-side navigation, matching real `<a>`/React Router behavior.
 #[wasm_bindgen(js_name = Link)]
 pub fn js_link(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
@@ -236,16 +237,25 @@ pub fn js_link(props: JsValue) -> JsValue {
 		.ok()
 		.and_then(|v| v.as_string())
 		.or_else(|| Reflect::get(&props, &"className".into()).ok().and_then(|v| v.as_string()));
+	let target = Reflect::get(&props, &"target".into()).ok().and_then(|v| v.as_string());
+	let rel = Reflect::get(&props, &"rel".into()).ok().and_then(|v| v.as_string());
 	let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 
-	// Memoized by `to` so the same `Closure`/`Function` is handed back
-	// across re-renders instead of a fresh one leaking every render (the
-	// same pattern `useNavigate` uses below).
+	// Memoized by `to`/`target` so the same `Closure`/`Function` is handed
+	// back across re-renders instead of a fresh one leaking every render
+	// (the same pattern `useNavigate` uses below).
 	let to_for_click = to.clone();
+	let target_for_click = target.clone();
 	let onclick_fn: Function = use_memo(
 		move || {
 			let closure = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
 				if e.default_prevented() || e.button() != 0 || e.meta_key() || e.ctrl_key() {
+					return;
+				}
+				// A non-"_self" target (e.g. `target="_blank"`) opens the link in
+				// another browsing context, so client-side navigation here would
+				// be wrong; let the browser handle it like a normal anchor.
+				if target_for_click.as_deref().is_some_and(|t| t != "_self") {
 					return;
 				}
 				e.prevent_default();
@@ -262,12 +272,18 @@ pub fn js_link(props: JsValue) -> JsValue {
 			}) as Box<dyn Fn(web_sys::MouseEvent)>);
 			closure.into_js_value().unchecked_into::<Function>()
 		},
-		Some(vec![DepVal(to.clone())]),
+		Some(vec![DepVal(to.clone()), DepVal(target.clone().unwrap_or_default())]),
 	);
 
 	let mut builder = VNode::tag("a").attr("href", to.as_str()).on("onClick", onclick_fn);
 	if let Some(cn) = class_name {
 		builder = builder.attr("className", cn.as_str());
+	}
+	if let Some(t) = target {
+		builder = builder.attr("target", t.as_str());
+	}
+	if let Some(r) = rel {
+		builder = builder.attr("rel", r.as_str());
 	}
 
 	if let Ok(child_vn) = js_to_vnode(&children)

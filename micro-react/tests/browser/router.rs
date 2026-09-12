@@ -304,6 +304,59 @@ fn link_onclick_handler_changes_when_to_changes() {
 	);
 }
 
+fn build_link_props_with_target(to: &str, target: &str) -> JsValue {
+	let props = build_link_props(to);
+	let _ = Reflect::set(&props, &"target".into(), &JsValue::from_str(target));
+	let _ = Reflect::set(&props, &"rel".into(), &JsValue::from_str("noopener"));
+	props
+}
+
+// A `target` other than `"_self"` (e.g. `target="_blank"`) opens the link in
+// another browsing context, so `Link` must not hijack the click with
+// client-side navigation there — it should behave like a plain `<a>` and
+// leave the event's default action alone for the browser to handle. This
+// also checks `target`/`rel` are reflected onto the rendered anchor, since
+// that's what lets the browser actually honor the new tab/window.
+#[wasm_bindgen_test]
+fn link_with_non_self_target_does_not_hijack_navigation() {
+	let container = make_container();
+	let link_fn = wrap_as_js_component(js_link, "Link");
+
+	let vnode = create_element(&link_fn, &build_link_props_with_target("/x", "_blank"), JsValue::NULL).expect("createElement should succeed");
+	micro_react::bindings::render(vnode, container.clone()).expect("initial render should succeed");
+
+	let anchor = container.query_selector("a").expect("query should not error").expect("expected an <a> element");
+	assert_eq!(anchor.get_attribute("target").as_deref(), Some("_blank"), "expected the anchor's target attribute to be set");
+	assert_eq!(anchor.get_attribute("rel").as_deref(), Some("noopener"), "expected the anchor's rel attribute to be set");
+
+	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
+	anchor.dispatch_event(&ev).expect("dispatch should succeed");
+
+	assert!(
+		!ev.default_prevented(),
+		"Link should not call preventDefault for a target other than \"_self\", so the browser can open it normally"
+	);
+}
+
+// A `target="_self"` (or no `target` at all) is functionally the same
+// browsing context as today, so `Link` should keep doing client-side
+// navigation exactly as before.
+#[wasm_bindgen_test]
+fn link_with_self_target_still_navigates_client_side() {
+	let container = make_container();
+	let link_fn = wrap_as_js_component(js_link, "Link");
+
+	let vnode = create_element(&link_fn, &build_link_props_with_target("/x", "_self"), JsValue::NULL).expect("createElement should succeed");
+	micro_react::bindings::render(vnode, container.clone()).expect("initial render should succeed");
+
+	let anchor = container.query_selector("a").expect("query should not error").expect("expected an <a> element");
+
+	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
+	anchor.dispatch_event(&ev).expect("dispatch should succeed");
+
+	assert!(ev.default_prevented(), "Link should still call preventDefault and navigate client-side when target is \"_self\"");
+}
+
 // ─── Routes recomputes its route table when children change ───
 
 fn build_route_props(path: &str, element: JsValue) -> JsValue {

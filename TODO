@@ -18,7 +18,6 @@ Things real React (or React Router) has that this project currently doesn't — 
 - No `useTransition`/`useDeferredValue` — everything renders through the same synchronous-priority flush path in `scheduler.rs`.
 - No `useSyncExternalStore` — `use_context`'s subscribe/notify pattern in `context.rs` is basically a bespoke version of this for one specific case (context), but there's no general-purpose external-store hook.
 - No `StrictMode`-style double-invoke-to-catch-impure-renders dev aid.
-- `Link`'s `target`/`rel` handling isn't there — real `Link`/`NavLink` skip client-side navigation when `target !== "_self"` (e.g. `target="_blank"`); this implementation's `js_link` onclick doesn't check `target` at all, so a `<Link target="_blank">` would still hijack the click.
 - No `<Link state={...}>` / `history.state` passthrough — `js_link`/`js_navigate` always push with `JsValue::NULL` as state, so `useLocation()`'s consumers can't receive router-passed state the way `location.state` does in react-router.
 
 ## Design/soundness notes
