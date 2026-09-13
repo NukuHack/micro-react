@@ -165,21 +165,25 @@ pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 	Some(ImportSpecifier { named, default_name, namespace_name, from })
 }
 
+#[must_use]
 pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let mut specifiers = Vec::new();
 	let lines: Vec<String> = source
 		.split('\n')
-		.map(|line| match parse_import_line(line) {
-			Some(spec) => {
-				specifiers.push(spec);
-				String::new()
-			}
-			None => line.to_string(),
+		.map(|line| {
+			parse_import_line(line).map_or_else(
+				|| line.to_string(),
+				|spec| {
+					specifiers.push(spec);
+					String::new()
+				},
+			)
 		})
 		.collect();
 	(lines.join("\n"), specifiers)
 }
 
+#[must_use]
 pub fn rewrite_default_export(source: &str) -> (String, Option<String>) {
 	let chars: Vec<char> = source.chars().collect();
 	let n = chars.len();
@@ -313,6 +317,7 @@ pub fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> 
 		.join("\n")
 }
 
+#[must_use]
 pub fn rewrite_exports_str(source: &str) -> String {
 	let mut exported = Vec::new();
 	let (code, default_name) = rewrite_default_export(source);
@@ -329,6 +334,7 @@ pub fn rewrite_exports_str(source: &str) -> String {
 	code
 }
 
+#[must_use]
 pub fn prepare_module_str(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let (code, specifiers) = extract_imports(source);
 	(rewrite_exports_str(&code), specifiers)
@@ -346,10 +352,10 @@ fn specifier_to_js(spec: &ImportSpecifier) -> Result<JsValue, JsValue> {
 	}
 	js_sys::Reflect::set(&obj, &"named".into(), &named)?;
 
-	let default_name = spec.default_name.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
+	let default_name = spec.default_name.as_deref().map_or(JsValue::NULL, JsValue::from_str);
 	js_sys::Reflect::set(&obj, &"defaultName".into(), &default_name)?;
 
-	let namespace_name = spec.namespace_name.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
+	let namespace_name = spec.namespace_name.as_deref().map_or(JsValue::NULL, JsValue::from_str);
 	js_sys::Reflect::set(&obj, &"namespaceName".into(), &namespace_name)?;
 
 	js_sys::Reflect::set(&obj, &"from".into(), &JsValue::from_str(&spec.from))?;

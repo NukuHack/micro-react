@@ -89,7 +89,7 @@ fn use_imperative_handle_exposes_custom_object_and_updates_when_deps_change() {
 		.unchecked_into();
 
 		let deps: JsValue = js_sys::Array::of1(&JsValue::from_f64(dep as f64)).into();
-		js_use_imperative_handle(ref_val.clone(), &create_handle, deps);
+		js_use_imperative_handle(ref_val.clone(), &create_handle, &deps);
 
 		VNode::tag("div").text("handle-host").build()
 	});
@@ -133,7 +133,7 @@ fn use_imperative_handle_nulls_the_ref_out_on_unmount() {
 	let comp = ComponentFn::infallible(move |_props: Props| {
 		let create_handle: js_sys::Function =
 			Closure::wrap(Box::new(move || -> JsValue { js_sys::Object::new().into() }) as Box<dyn Fn() -> JsValue>).into_js_value().unchecked_into();
-		js_use_imperative_handle(ref_val.clone(), &create_handle, JsValue::UNDEFINED);
+		js_use_imperative_handle(ref_val.clone(), &create_handle, &JsValue::UNDEFINED);
 		VNode::tag("div").text("handle-host").build()
 	});
 

@@ -254,7 +254,7 @@ const CASED_ATTR_NAMES: &[(&str, &str)] = &[
 /// text the author actually wrote, instead of only handling the one
 /// hardcoded `on...Capture` case.
 ///
-/// Attribute *names* in `html\`\`` are always static text (only values can
+/// Attribute *names* in `html` are always static text (only values can
 /// be holes), so scanning the concatenated static HTML is sufficient — no
 /// need to look at the live substituted values.
 fn build_case_map(html: &str) -> HashMap<String, String> {
@@ -359,10 +359,7 @@ fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> Str
 		// downstream regardless) but keeps the reconstructed
 		// name looking like a real prop, not "onclickCapture".
 		let mut chars = evt.chars();
-		let evt_capitalized = match chars.next() {
-			Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
-			None => String::new(),
-		};
+		let evt_capitalized = chars.next().map_or_else(String::new, |c| c.to_ascii_uppercase().to_string() + chars.as_str());
 		return format!("on{evt_capitalized}Capture");
 	}
 	lowered.to_string()
@@ -379,7 +376,7 @@ enum TagSource {
 }
 
 /// One run of text containing zero or more `${...}` holes:
-/// literals.len() == holes.len() + 1, e.g. "a" ${0} "b" ${1} "c".
+/// `literals.len()` == `holes.len()` + 1, e.g. "a" ${0} "b" ${1} "c".
 #[derive(Clone, Debug)]
 struct TextTemplate {
 	literals: Vec<String>,
@@ -489,7 +486,7 @@ fn build_sentinel_html(statics: &[String]) -> String {
 		html.push_str(&statics[i]);
 
 		let prev_trimmed = statics[i].trim_end();
-		let next = statics.get(i + 1).map(String::as_str).unwrap_or("");
+		let next = statics.get(i + 1).map_or("", String::as_str);
 		// Deliberately NOT trimmed: whether the hole is in tag vs. content
 		// position depends on the character right after it, and trimming
 		// first would throw that signal away.
@@ -533,7 +530,7 @@ fn split_holes(s: &str) -> TextTemplate {
 	let mut literals = Vec::new();
 	let mut holes = Vec::new();
 	let mut buf = String::new();
-	let mut chars = s.chars().peekable();
+	let mut chars = s.chars();
 
 	while let Some(c) = chars.next() {
 		if c != MARK {
@@ -570,7 +567,7 @@ fn attr_value_template(raw: &str) -> AttrValueTemplate {
 	let tt = split_holes(raw);
 	if tt.holes.is_empty() {
 		AttrValueTemplate::Static(raw.to_string())
-	} else if tt.holes.len() == 1 && tt.literals.iter().all(|l| l.is_empty()) {
+	} else if tt.holes.len() == 1 && tt.literals.iter().all(String::is_empty) {
 		AttrValueTemplate::Hole(tt.holes[0])
 	} else {
 		AttrValueTemplate::Mixed(tt)
@@ -615,10 +612,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 		Node::ELEMENT_NODE => {
 			let elem: &Element = node.unchecked_ref();
 			let tag_name = elem.local_name();
-			let tag = match tag_slot_index(&tag_name) {
-				Some(idx) => TagSource::Hole(idx),
-				None => TagSource::Static(tag_name),
-			};
+			let tag = tag_slot_index(&tag_name).map_or_else(|| TagSource::Static(tag_name), TagSource::Hole);
 
 			let mut attrs = Vec::new();
 			let mut key = None;
@@ -676,7 +670,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 /// HTML5 tree-construction rules; encountered anywhere else (including
 /// inside our synthetic `<root>` wrapper) they're simply *ignored* by the
 /// "in body" insertion mode — not an error, just silently dropped. So a
-/// component whose whole template root is e.g. `html\`<tr>...\`` (not
+/// component whose whole template root is e.g. `html <tr>...` (not
 /// nested inside a literal `<table>` in the same template) would vanish
 /// with no signal. To parse correctly it needs a real `<table>` ancestor
 /// providing genuine table-construction context; this returns the extra
@@ -743,7 +737,7 @@ fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
 	let html = expand_self_closing_tags(&html);
 	let case_map = build_case_map(&html);
 
-	let (wrap_prefix, wrap_suffix, extra_depth) = first_tag_name(&html).map(|tag| table_context_wrapper(&tag)).unwrap_or(("", "", 0));
+	let (wrap_prefix, wrap_suffix, extra_depth) = first_tag_name(&html).map_or(("", "", 0), |tag| table_context_wrapper(&tag));
 
 	let parser = DomParser::new()?;
 	let doc = parser.parse_from_string(&format!("<root>{wrap_prefix}{html}{wrap_suffix}</root>"), SupportedType::TextHtml)?;
@@ -953,7 +947,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 	// Raw, unconverted ref value (needed for `forwardRef`, which wants the
 	// caller's actual ref handed through as an argument) alongside the
 	// NodeRef wrapper (needed for a plain DOM-element `ref`).
-	let raw_ref: JsValue = tpl.ref_hole.map(|i| values.get(i as u32)).unwrap_or(JsValue::UNDEFINED);
+	let raw_ref: JsValue = tpl.ref_hole.map_or(JsValue::UNDEFINED, |i| values.get(i as u32));
 	let node_ref: Option<NodeRef> = js_ref_to_node_ref(&raw_ref);
 
 	match &tpl.tag {
@@ -975,7 +969,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 			// `<${Fragment}>...</${Fragment}>` — same Fragment symbol
 			// `createElement` recognizes.
 			let frag_sym = js_sys::Symbol::for_("MicroReact.Fragment");
-			if type_val.is_symbol() && js_sys::Object::is(&type_val, frag_sym.as_ref()) {
+			if type_val.is_symbol() && Object::is(&type_val, frag_sym.as_ref()) {
 				let vn = VNode::fragment(child_vnodes);
 				return Some(vn.with_key(key));
 			}
@@ -999,9 +993,9 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 			// attrs (and any spread props, merged in source order) become
 			// props, children get attached as `props.children`.
 			if type_val.is_function() {
-				let fn_: js_sys::Function = type_val.clone().unchecked_into();
+				let fn_: js_sys::Function = type_val.unchecked_into();
 				let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
-				let is_forward_ref = Reflect::get(&fn_, &crate::bindings::FORWARD_REF_MARKER.into()).map(|v| v.is_truthy()).unwrap_or(false);
+				let is_forward_ref = Reflect::get(&fn_, &crate::bindings::FORWARD_REF_MARKER.into()).is_ok_and(|v| v.is_truthy());
 
 				let mut props: Props = Vec::new();
 				for entry in &tpl.attrs {
@@ -1015,7 +1009,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 				}
 
 				let children_for_fn = child_vnodes.clone();
-				let raw_ref_for_fn = raw_ref.clone();
+				let raw_ref_for_fn = raw_ref;
 				let vn = VNode::component(
 					fn_name,
 					ComponentFn::new(move |comp_props| {
@@ -1373,7 +1367,7 @@ mod pure_logic_tests {
 	fn split_holes_malformed_token_is_kept_verbatim() {
 		// An unterminated MARK run (no closing MARK) shouldn't be parsed as a
 		// hole, and shouldn't silently eat the trailing characters either.
-		let s = format!("a{}not-a-real-hole", MARK);
+		let s = format!("a{MARK}not-a-real-hole");
 		let tt = split_holes(&s);
 		assert!(tt.holes.is_empty());
 		assert_eq!(tt.literals, vec![s]);
@@ -1383,7 +1377,7 @@ mod pure_logic_tests {
 	fn split_holes_non_numeric_mark_pair_is_kept_verbatim() {
 		// Closed MARK...MARK run, but the inner text isn't "h<digits>" —
 		// shouldn't be mistaken for a real hole token.
-		let s = format!("a{}nothex{}b", MARK, MARK);
+		let s = format!("a{MARK}nothex{MARK}b");
 		let tt = split_holes(&s);
 		assert!(tt.holes.is_empty());
 		assert_eq!(tt.literals, vec![s]);
@@ -1413,7 +1407,7 @@ mod pure_logic_tests {
 		let raw = format!("px-{}", hole_token(0));
 		match attr_value_template(&raw) {
 			AttrValueTemplate::Mixed(tt) => {
-				assert_eq!(tt.literals, vec!["px-".to_string(), "".to_string()]);
+				assert_eq!(tt.literals, vec!["px-".to_string(), String::new()]);
 				assert_eq!(tt.holes, vec![0]);
 			}
 			other => panic!("expected Mixed, got {other:?}"),
@@ -1432,16 +1426,16 @@ mod pure_logic_tests {
 // ───────────────────────────── entry point ─────────────────────────────
 
 #[wasm_bindgen(js_name = htmlTemplate)]
-pub fn html_template(statics: Array, values: Array) -> Result<JsValue, JsValue> {
+pub fn html_template(statics: &Array, values: &Array) -> Result<JsValue, JsValue> {
 	let static_strs: Vec<String> = statics.iter().filter_map(|v| v.as_string()).collect();
-	let tpl_idx = get_or_compile(&statics, &static_strs)?;
+	let tpl_idx = get_or_compile(statics, &static_strs)?;
 
 	let vnode = TEMPLATES.with(|t| {
 		let templates = t.borrow();
 		let compiled = &templates[tpl_idx];
 		let mut roots = Vec::new();
 		for r in &compiled.roots {
-			render_child(r, &values, &mut roots);
+			render_child(r, values, &mut roots);
 		}
 		match roots.len() {
 			0 => VNode::null(),

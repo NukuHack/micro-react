@@ -74,7 +74,7 @@ fn js_use_effect_runs_the_js_callback_and_its_js_cleanup_on_dep_change() {
 
 		let dep_str = if tick < 2 { "same" } else { "changed" };
 		let deps: JsValue = Array::of1(&JsValue::from_str(dep_str)).into();
-		js_use_effect(&callback, deps);
+		js_use_effect(&callback, &deps);
 		VNode::text(tick.to_string())
 	});
 	root.render(VNode::component("JsEffectComp", comp, vec![])).unwrap();
@@ -118,7 +118,7 @@ fn js_use_layout_effect_runs_the_js_callback_synchronously_and_its_js_cleanup_on
 			.unchecked_into();
 			Some(cleanup)
 		});
-		js_use_layout_effect(&callback, JsValue::UNDEFINED);
+		js_use_layout_effect(&callback, &JsValue::UNDEFINED);
 		VNode::text("hi")
 	});
 	root.render(VNode::component("JsLayoutEffectComp", comp, vec![])).unwrap();

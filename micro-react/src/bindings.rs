@@ -105,7 +105,7 @@ pub(crate) fn stringify_thrown(v: &JsValue) -> String {
 	if let Some(msg) = Reflect::get(v, &"message".into()).ok().and_then(|m| m.as_string()) {
 		return msg;
 	}
-	format!("{:?}", v)
+	format!("{v:?}")
 }
 
 fn cell_key(cell: &Rc<RefCell<Box<dyn std::any::Any>>>) -> usize {
@@ -139,12 +139,20 @@ pub(crate) fn evict_setter_cache(cell: &Rc<RefCell<Box<dyn std::any::Any>>>) {
 // ─── Root handle (JS-visible) ───
 
 #[wasm_bindgen]
+#[derive(Debug)]
 pub struct JsRoot {
 	inner: RefCell<Root>,
 }
 
 #[wasm_bindgen]
 impl JsRoot {
+	// `vnode` is taken by value (rather than `&JsValue`, per
+	// `clippy::needless_pass_by_value`) to keep this call symmetric with
+	// the free `render()` function below and because it's the crate's
+	// primary, most-called public entry point — narrowing it to `&JsValue`
+	// buys nothing (JsValue is a cheap handle to clone) at the cost of an
+	// `&` at every call site across the JS glue and the test suite.
+	#[allow(clippy::needless_pass_by_value)]
 	pub fn render(&self, vnode: JsValue) -> Result<(), JsValue> {
 		let vnode = js_to_vnode(&vnode)?;
 		crate::console_log!("[micro-react] root render()");
@@ -157,6 +165,9 @@ impl JsRoot {
 }
 
 #[wasm_bindgen(js_name = render)]
+// Kept by-value deliberately (see the note on `JsRoot::render` above):
+// this is the crate's other main entry point, called the same way.
+#[allow(clippy::needless_pass_by_value)]
 pub fn render(vnode: JsValue, container: Element) -> Result<JsRoot, JsValue> {
 	let vnode = js_to_vnode(&vnode)?;
 	crate::console_log!("[micro-react] render() mounting to container");
@@ -213,10 +224,10 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 	let node_ref: Option<NodeRef> = js_ref_to_node_ref(&raw_ref);
 
 	let mut rust_props: Props = Vec::new();
-	let dummy = js_sys::Object::new();
+	let dummy = Object::new();
 	if props.is_object() && !props.is_null() {
-		let obj = props.dyn_ref::<js_sys::Object>().unwrap_or(&dummy);
-		let keys = js_sys::Object::keys(obj);
+		let obj = props.dyn_ref::<Object>().unwrap_or(&dummy);
+		let keys = Object::keys(obj);
 		for k in keys.iter() {
 			let k_str = k.as_string().unwrap_or_default();
 			if k_str == "key" || k_str == "ref" {
@@ -239,7 +250,7 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 	// Special Fragment symbol
 	let is_fragment = {
 		let frag_sym = js_sys::Symbol::for_("MicroReact.Fragment");
-		type_.is_symbol() && js_sys::Object::is(type_, frag_sym.as_ref())
+		type_.is_symbol() && Object::is(type_, frag_sym.as_ref())
 	};
 
 	let vnode = if is_fragment {
@@ -259,10 +270,10 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 	} else if type_.is_function() {
 		let fn_: Function = type_.clone().dyn_into().expect("type_.is_function() checked above");
 		let fn_name = Reflect::get(&fn_, &"name".into()).ok().and_then(|v| v.as_string()).unwrap_or_else(|| "Anonymous".to_string());
-		let is_forward_ref = Reflect::get(&fn_, &FORWARD_REF_MARKER.into()).map(|v| v.is_truthy()).unwrap_or(false);
+		let is_forward_ref = Reflect::get(&fn_, &FORWARD_REF_MARKER.into()).is_ok_and(|v| v.is_truthy());
 
 		let children_for_fn = child_vnodes.clone();
-		let raw_ref_for_fn = raw_ref.clone();
+		let raw_ref_for_fn = raw_ref;
 		VNode::component(
 			fn_name,
 			ComponentFn::new(move |props| {
@@ -302,7 +313,7 @@ pub(crate) fn js_ref_to_node_ref(ref_val: &JsValue) -> Option<NodeRef> {
 	if ref_val.is_function() {
 		let f: Function = ref_val.clone().dyn_into().ok()?;
 		return Some(NodeRef::with_sync(move |node: Option<web_sys::Node>| {
-			let arg: JsValue = node.map(Into::into).unwrap_or(JsValue::NULL);
+			let arg: JsValue = node.map_or(JsValue::NULL, Into::into);
 			let _ = f.call1(&JsValue::NULL, &arg);
 		}));
 	}
@@ -310,7 +321,7 @@ pub(crate) fn js_ref_to_node_ref(ref_val: &JsValue) -> Option<NodeRef> {
 	if ref_val.is_object() {
 		let obj = ref_val.clone();
 		return Some(NodeRef::with_sync(move |node: Option<web_sys::Node>| {
-			let val: JsValue = node.map(Into::into).unwrap_or(JsValue::NULL);
+			let val: JsValue = node.map_or(JsValue::NULL, Into::into);
 			let _ = Reflect::set(&obj, &"current".into(), &val);
 		}));
 	}
@@ -320,6 +331,7 @@ pub(crate) fn js_ref_to_node_ref(ref_val: &JsValue) -> Option<NodeRef> {
 
 /// Returns the Symbol used as the Fragment type.
 #[wasm_bindgen(js_name = getFragment)]
+#[must_use]
 pub fn get_fragment() -> JsValue {
 	js_sys::Symbol::for_("MicroReact.Fragment").into()
 }
@@ -332,6 +344,7 @@ pub fn get_fragment() -> JsValue {
 /// updaters (`setState(prev => next)`), resolved against the hook's live
 /// cell at call time so they never see a stale snapshot.
 #[wasm_bindgen(js_name = useState)]
+#[must_use]
 pub fn js_use_state(initial: JsValue) -> Array {
 	let (value, cell, setter) = use_state_cell(initial);
 
@@ -358,6 +371,7 @@ pub fn js_use_state(initial: JsValue) -> Array {
 
 /// `useReducer(reducer, initialState)` — returns `[state, dispatch]`.
 #[wasm_bindgen(js_name = useReducer)]
+#[must_use]
 pub fn js_use_reducer(reducer: &Function, initial: JsValue) -> Array {
 	let reducer = reducer.clone();
 
@@ -380,9 +394,9 @@ pub fn js_use_reducer(reducer: &Function, initial: JsValue) -> Array {
 
 /// `useEffect(callback, deps?)` — callback returns an optional cleanup function.
 #[wasm_bindgen(js_name = useEffect)]
-pub fn js_use_effect(callback: &Function, deps: JsValue) {
+pub fn js_use_effect(callback: &Function, deps: &JsValue) {
 	let callback = callback.clone();
-	let rust_deps = js_deps_to_rust(&deps);
+	let rust_deps = js_deps_to_rust(deps);
 
 	crate::hooks::use_effect(
 		move || {
@@ -400,9 +414,9 @@ pub fn js_use_effect(callback: &Function, deps: JsValue) {
 
 /// `useLayoutEffect(callback, deps?)` — fires synchronously after DOM updates.
 #[wasm_bindgen(js_name = useLayoutEffect)]
-pub fn js_use_layout_effect(callback: &Function, deps: JsValue) {
+pub fn js_use_layout_effect(callback: &Function, deps: &JsValue) {
 	let callback = callback.clone();
-	let rust_deps = js_deps_to_rust(&deps);
+	let rust_deps = js_deps_to_rust(deps);
 	use_layout_effect(
 		move || {
 			let result = callback.call0(&JsValue::NULL).ok();
@@ -422,10 +436,11 @@ pub fn js_use_layout_effect(callback: &Function, deps: JsValue) {
 /// never touches the scheduler, so (unlike a `useState`-based
 /// implementation) calling this never triggers an extra re-render.
 #[wasm_bindgen(js_name = useRef)]
-pub fn js_use_ref(initial: JsValue) -> Object {
+#[must_use]
+pub fn js_use_ref(initial: &JsValue) -> Object {
 	let cell = crate::hooks::use_ref_cell(|| {
 		let obj = Object::new();
-		Reflect::set(&obj, &"current".into(), &initial).expect("setting a plain-object property cannot fail");
+		Reflect::set(&obj, &"current".into(), initial).expect("setting a plain-object property cannot fail");
 		let obj_val: JsValue = obj.into();
 		obj_val
 	});
@@ -442,14 +457,14 @@ pub fn js_use_ref(initial: JsValue) -> Object {
 /// unmount or before the next handle is installed, matching a real ref's
 /// teardown semantics.
 #[wasm_bindgen(js_name = useImperativeHandle)]
-pub fn js_use_imperative_handle(ref_val: JsValue, create_handle: &Function, deps: JsValue) {
+pub fn js_use_imperative_handle(ref_val: JsValue, create_handle: &Function, deps: &JsValue) {
 	let create_handle = create_handle.clone();
-	let rust_deps = js_deps_to_rust(&deps);
+	let rust_deps = js_deps_to_rust(deps);
 	use_layout_effect(
 		move || {
 			let handle = create_handle.call0(&JsValue::NULL).unwrap_or(JsValue::UNDEFINED);
 			write_ref_value(&ref_val, &handle);
-			let ref_val_cleanup = ref_val.clone();
+			let ref_val_cleanup = ref_val;
 			Box::new(move || {
 				write_ref_value(&ref_val_cleanup, &JsValue::NULL);
 			}) as Box<dyn FnOnce()>
@@ -479,22 +494,25 @@ fn write_ref_value(ref_val: &JsValue, value: &JsValue) {
 
 /// `useMemo(factory, deps)` — returns a memoised value.
 #[wasm_bindgen(js_name = useMemo)]
-pub fn js_use_memo(factory: &Function, deps: JsValue) -> JsValue {
+#[must_use]
+pub fn js_use_memo(factory: &Function, deps: &JsValue) -> JsValue {
 	let factory = factory.clone();
-	let rust_deps = js_deps_to_rust(&deps);
+	let rust_deps = js_deps_to_rust(deps);
 	use_memo(move || factory.call0(&JsValue::NULL).unwrap_or(JsValue::UNDEFINED), rust_deps)
 }
 
 /// `useCallback(fn, deps)` — returns a stable function reference.
 #[wasm_bindgen(js_name = useCallback)]
-pub fn js_use_callback(f: &Function, deps: JsValue) -> JsValue {
+#[must_use]
+pub fn js_use_callback(f: &Function, deps: &JsValue) -> JsValue {
 	let f = f.clone();
-	let rust_deps = js_deps_to_rust(&deps);
+	let rust_deps = js_deps_to_rust(deps);
 	use_memo(move || -> JsValue { f.into() }, rust_deps)
 }
 
 /// `useId()` — returns a stable unique string id.
 #[wasm_bindgen(js_name = useId)]
+#[must_use]
 pub fn js_use_id() -> String {
 	use_id()
 }
@@ -528,7 +546,7 @@ pub fn js_create_context(default_value: JsValue) -> Result<JsValue, JsValue> {
 
 	let ctx_provider = ctx;
 	let provider_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
-		let value = Reflect::get(&props, &"value".into()).unwrap_or(default_value.clone());
+		let value = Reflect::get(&props, &"value".into()).unwrap_or_else(|_| default_value.clone());
 		ctx_provider.set_value(value);
 		Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
 	}) as Box<dyn Fn(JsValue) -> JsValue>);
@@ -582,7 +600,7 @@ pub fn js_use_context(input: &JsValue) -> Result<JsValue, JsValue> {
 				.unwrap_or_else(|| "Unknown error".to_string());
 
 			// Throw the wrapped Error back to JavaScript
-			Err(Error::new(&format!("useContext: failed to execute useContext on input object - {}", err_message)).into())
+			Err(Error::new(&format!("useContext: failed to execute useContext on input object - {err_message}")).into())
 		}
 	}
 }
@@ -603,15 +621,12 @@ pub fn js_memo(component: &Function, compare: JsValue) -> Result<JsValue, JsValu
 	let prev_result: Rc<RefCell<Option<VNode>>> = Rc::new(RefCell::new(None));
 
 	let wrapper = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
-		let should_skip = if let Some(prev) = prev_props.borrow().as_ref() {
-			if let Some(cmp) = &compare_fn {
-				cmp.call2(&JsValue::NULL, prev, &props).ok().and_then(|v| v.as_bool()).unwrap_or(false)
-			} else {
-				shallow_equal(prev, &props)
-			}
-		} else {
-			false
-		};
+		let should_skip = prev_props.borrow().as_ref().is_some_and(|prev| {
+			compare_fn.as_ref().map_or_else(
+				|| shallow_equal(prev, &props),
+				|cmp| cmp.call2(&JsValue::NULL, prev, &props).ok().and_then(|v| v.as_bool()).unwrap_or(false),
+			)
+		});
 
 		if should_skip && let Some(vn) = prev_result.borrow().as_ref() {
 			return vnode_to_js(vn.clone()).unwrap_or(JsValue::NULL);
@@ -657,18 +672,18 @@ pub fn js_forward_ref(render: &Function) -> Result<JsValue, JsValue> {
 }
 
 fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {
-	if js_sys::Object::is(a, b) {
+	if Object::is(a, b) {
 		return true;
 	}
 	if !a.is_object() || !b.is_object() {
 		return false;
 	}
 	let ka = match a.dyn_ref::<Object>() {
-		Some(o) => js_sys::Object::keys(o),
+		Some(o) => Object::keys(o),
 		None => return false,
 	};
 	let kb = match b.dyn_ref::<Object>() {
-		Some(o) => js_sys::Object::keys(o),
+		Some(o) => Object::keys(o),
 		None => return false,
 	};
 	if ka.length() != kb.length() {
@@ -677,7 +692,7 @@ fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {
 	for k in ka.iter() {
 		let va = Reflect::get(a, &k).unwrap_or(JsValue::UNDEFINED);
 		let vb = Reflect::get(b, &k).unwrap_or(JsValue::UNDEFINED);
-		if !js_sys::Object::is(&va, &vb) {
+		if !Object::is(&va, &vb) {
 			return false;
 		}
 	}
@@ -686,23 +701,25 @@ fn shallow_equal(a: &JsValue, b: &JsValue) -> bool {
 
 // ─── ErrorBoundary component factory ───
 
+/// Resets a re-entrancy guard on drop (normal return or unwind), so a panic
+/// inside a boundary/suspense component or its children can't leave the
+/// guard stuck. Shared by `js_create_error_boundary`/`js_create_suspense`.
+struct ResetOnDrop(Rc<RefCell<bool>>);
+impl Drop for ResetOnDrop {
+	fn drop(&mut self) {
+		*self.0.borrow_mut() = false;
+	}
+}
+
 /// Returns a JS function component that acts as an error boundary.
 /// Usage: `createElement(ErrorBoundary, { fallback: err => <div>{err.message}</div> }, children)`
 #[wasm_bindgen(js_name = createErrorBoundary)]
+#[must_use]
 pub fn js_create_error_boundary() -> JsValue {
 	// Re-entrancy guard: js_use_state can trigger a synchronous re-render
 	// that re-invokes this closure before the first call returns; skip
 	// re-entrant calls and return NULL.
 	let in_progress = Rc::new(RefCell::new(false));
-
-	/// Resets `in_progress` on drop (normal return or unwind), so a panic
-	/// inside the boundary or its children can't leave the guard stuck.
-	struct ResetOnDrop(Rc<RefCell<bool>>);
-	impl Drop for ResetOnDrop {
-		fn drop(&mut self) {
-			*self.0.borrow_mut() = false;
-		}
-	}
 
 	let boundary_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
 		if *in_progress.borrow() {
@@ -710,13 +727,17 @@ pub fn js_create_error_boundary() -> JsValue {
 		}
 		*in_progress.borrow_mut() = true;
 		let _reset = ResetOnDrop(in_progress.clone());
-		js_create_error_boundary_inner(props)
+		js_create_error_boundary_inner(&props)
 	}) as Box<dyn Fn(JsValue) -> JsValue>);
 
 	boundary_fn.into_js_value()
 }
 
-fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
+// Reaches through a raw `*mut ComponentInst` to install this render's error
+// setter (see the module-wide justification in hooks.rs); sound because
+// WASM is single-threaded and the pointer is only used within this render.
+#[allow(unsafe_code)]
+fn js_create_error_boundary_inner(props: &JsValue) -> JsValue {
 	let arr = js_use_state(JsValue::NULL);
 	let error: JsValue = arr.get(0);
 	let set_error: JsValue = arr.get(1);
@@ -726,7 +747,7 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 	// report to (see hooks::report_to_nearest_boundary).
 	{
 		let inst_ptr = current_inst();
-		let setter_fn = set_error.clone();
+		let setter_fn = set_error;
 		let rc_setter: Rc<dyn Fn(JsValue)> = Rc::new(move |err: JsValue| {
 			if let Some(f) = setter_fn.dyn_ref::<Function>() {
 				let _ = f.call1(&JsValue::NULL, &err);
@@ -740,7 +761,7 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 
 	if !error.is_null() && !error.is_undefined() {
 		crate::console_error!("[micro-react] ErrorBoundary caught: {}", stringify_thrown(&error));
-		let fallback = Reflect::get(&props, &"fallback".into()).unwrap_or(JsValue::NULL);
+		let fallback = Reflect::get(props, &"fallback".into()).unwrap_or(JsValue::NULL);
 		if fallback.is_function() {
 			let f: Function = fallback.dyn_into().expect("fallback.is_function() checked above");
 			return f.call1(&JsValue::NULL, &error).unwrap_or(JsValue::NULL);
@@ -748,7 +769,7 @@ fn js_create_error_boundary_inner(props: JsValue) -> JsValue {
 		return fallback;
 	}
 
-	Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
+	Reflect::get(props, &"children".into()).unwrap_or(JsValue::NULL)
 }
 
 // ─── Suspense component factory ───
@@ -761,7 +782,7 @@ fn is_thenable(v: &JsValue) -> bool {
 	if !v.is_object() {
 		return false;
 	}
-	Reflect::get(v, &"then".into()).map(|t| t.is_function()).unwrap_or(false)
+	Reflect::get(v, &"then".into()).is_ok_and(|t| t.is_function())
 }
 
 /// Returns a JS function component that acts as a suspense boundary.
@@ -777,18 +798,12 @@ fn is_thenable(v: &JsValue) -> bool {
 /// `ErrorBoundary` sits above it, since Suspense (like React's) doesn't
 /// catch errors, only pending async work.
 #[wasm_bindgen(js_name = createSuspense)]
+#[must_use]
 pub fn js_create_suspense() -> JsValue {
 	// Same re-entrancy guard as createErrorBoundary: js_use_state can trigger
 	// a synchronous re-render that re-invokes this closure before the first
 	// call returns.
 	let in_progress = Rc::new(RefCell::new(false));
-
-	struct ResetOnDrop(Rc<RefCell<bool>>);
-	impl Drop for ResetOnDrop {
-		fn drop(&mut self) {
-			*self.0.borrow_mut() = false;
-		}
-	}
 
 	let suspense_fn = Closure::wrap(Box::new(move |props: JsValue| -> JsValue {
 		if *in_progress.borrow() {
@@ -796,13 +811,15 @@ pub fn js_create_suspense() -> JsValue {
 		}
 		*in_progress.borrow_mut() = true;
 		let _reset = ResetOnDrop(in_progress.clone());
-		js_create_suspense_inner(props)
+		js_create_suspense_inner(&props)
 	}) as Box<dyn Fn(JsValue) -> JsValue>);
 
 	suspense_fn.into_js_value()
 }
 
-fn js_create_suspense_inner(props: JsValue) -> JsValue {
+// See the SAFETY note on `js_create_error_boundary_inner` above.
+#[allow(unsafe_code)]
+fn js_create_suspense_inner(props: &JsValue) -> JsValue {
 	let arr = js_use_state(JsValue::NULL);
 	let caught: JsValue = arr.get(0);
 	let set_caught: JsValue = arr.get(1);
@@ -810,7 +827,7 @@ fn js_create_suspense_inner(props: JsValue) -> JsValue {
 	{
 		let inst_ptr = current_inst();
 		let inst_weak = current_weak();
-		let setter_fn = set_caught.clone();
+		let setter_fn = set_caught;
 		let rc_setter: Rc<dyn Fn(JsValue)> = Rc::new(move |value: JsValue| {
 			if is_thenable(&value) {
 				if let Some(f) = setter_fn.dyn_ref::<Function>() {
@@ -819,7 +836,7 @@ fn js_create_suspense_inner(props: JsValue) -> JsValue {
 				// Retry (clear the pending state) once the promise settles,
 				// whether it resolves or rejects — a still-failing child
 				// will just suspend or throw again on the retry.
-				if let Ok(then_fn) = Reflect::get(&value, &"then".into()).and_then(|t| t.dyn_into::<Function>()) {
+				if let Ok(then_fn) = Reflect::get(&value, &"then".into()).and_then(wasm_bindgen::JsCast::dyn_into::<Function>) {
 					let f2 = setter_fn.clone();
 					let retry = Closure::once_into_js(move |_: JsValue| {
 						if let Some(sf) = f2.dyn_ref::<Function>() {
@@ -844,10 +861,10 @@ fn js_create_suspense_inner(props: JsValue) -> JsValue {
 	}
 
 	if is_thenable(&caught) {
-		return Reflect::get(&props, &"fallback".into()).unwrap_or(JsValue::NULL);
+		return Reflect::get(props, &"fallback".into()).unwrap_or(JsValue::NULL);
 	}
 
-	Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL)
+	Reflect::get(props, &"children".into()).unwrap_or(JsValue::NULL)
 }
 
 // ─── Boot convenience: bundle the non-standard exports ───
@@ -1059,7 +1076,7 @@ mod vnode_store_tests {
 		let id = store_vnode(VNode::text("hello"));
 		let got = take_vnode(id).expect("vnode should be present after storing");
 		match got.inner {
-			crate::vnode::VNodeInner::Text(s) => assert_eq!(s, "hello"),
+			VNodeInner::Text(s) => assert_eq!(s, "hello"),
 			_ => panic!("expected a text vnode"),
 		}
 	}
@@ -1092,7 +1109,7 @@ mod vnode_store_tests {
 		let a = take_vnode(id1).unwrap();
 		let b = take_vnode(id2).unwrap();
 		match (a.inner, b.inner) {
-			(crate::vnode::VNodeInner::Text(a), crate::vnode::VNodeInner::Text(b)) => {
+			(VNodeInner::Text(a), VNodeInner::Text(b)) => {
 				assert_eq!(a, "a");
 				assert_eq!(b, "b");
 			}
@@ -1112,7 +1129,7 @@ mod vnode_store_tests {
 		// that never reads the value it was handed.
 		let got = take_vnode(kept).unwrap();
 		match got.inner {
-			crate::vnode::VNodeInner::Text(s) => assert_eq!(s, "kept"),
+			VNodeInner::Text(s) => assert_eq!(s, "kept"),
 			_ => panic!("expected text vnode"),
 		}
 		// The discarded entry is still sitting in the store (a bounded,
@@ -1219,14 +1236,14 @@ mod conversion_tests {
 
 		let f: Function = Closure::wrap(Box::new(|| {}) as Box<dyn Fn()>).into_js_value().unchecked_into();
 		match js_val_to_prop_val(&f.clone().into()) {
-			PropVal::Callback(cb) => assert!(js_sys::Object::is(cb.as_ref(), f.as_ref())),
+			PropVal::Callback(cb) => assert!(Object::is(cb.as_ref(), f.as_ref())),
 			other => panic!("expected a Callback PropVal, got {other:?}"),
 		}
 
 		let style = Object::new();
 		let _ = Reflect::set(&style, &"color".into(), &"red".into());
 		match js_val_to_prop_val(&style.clone().into()) {
-			PropVal::Js(v) => assert!(js_sys::Object::is(&v, &style.into())),
+			PropVal::Js(v) => assert!(Object::is(&v, &style.into())),
 			other => panic!("expected a Js PropVal for a plain object, got {other:?}"),
 		}
 	}
@@ -1252,26 +1269,31 @@ fn js_deps_to_rust(deps: &JsValue) -> Option<Vec<DepVal>> {
 	if deps.is_undefined() || deps.is_null() {
 		return None; // always re-run
 	}
-	if let Ok(arr) = deps.clone().dyn_into::<Array>() {
-		let v = arr
-			.iter()
+	// `dyn_ref` (borrowing) instead of `deps.clone().dyn_into()` avoids an
+	// FFI-crossing JsValue clone on every hook call that has deps.
+	deps.dyn_ref::<Array>().map(|arr| {
+		arr.iter()
 			.map(|d| {
-				if let Some(s) = d.as_string() {
-					DepVal(s)
-				} else if let Some(n) = d.as_f64() {
-					DepVal(n.to_string())
-				} else if let Some(b) = d.as_bool() {
-					DepVal(b.to_string())
-				} else {
-					// Non-primitive deps must serialize structurally, not
-					// collapse to a constant "js" string, or memoized values
-					// would never recompute when they actually change.
-					js_sys::JSON::stringify(&d).ok().and_then(|s| s.as_string()).map(DepVal).unwrap_or_else(|| DepVal("js".to_string()))
-				}
+				d.as_string().map_or_else(
+					|| {
+						d.as_f64().map_or_else(
+							|| {
+								d.as_bool().map_or_else(
+									|| {
+										// Non-primitive deps must serialize structurally, not
+										// collapse to a constant "js" string, or memoized values
+										// would never recompute when they actually change.
+										js_sys::JSON::stringify(&d).ok().and_then(|s| s.as_string()).map_or_else(|| DepVal("js".to_string()), DepVal)
+									},
+									|b| DepVal(b.to_string()),
+								)
+							},
+							|n| DepVal(n.to_string()),
+						)
+					},
+					DepVal,
+				)
 			})
-			.collect();
-		Some(v)
-	} else {
-		None
-	}
+			.collect()
+	})
 }

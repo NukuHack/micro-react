@@ -61,9 +61,9 @@ fn looks_like_jsx_start(chars: &[char], i: usize) -> bool {
 }
 
 /// Synthetic attribute name prefix used to smuggle a JSX spread
-/// (`{...expr}`) through the `html`` sentinel-HTML pipeline. Attribute
+/// (`{...expr}`) through the `html` sentinel-HTML pipeline. Attribute
 /// *names* in that pipeline must be static text (see the comment on
-/// `build_case_map` in html_template.rs) so a bare `...expr` can't be
+/// `build_case_map` in `html_template.rs``) so a bare `...expr` can't be
 /// represented directly; instead it's rewritten as a normal
 /// `name="${expr}"` attribute using this reserved name prefix, and
 /// `html_template::compile_node` recognizes the prefix and treats the
@@ -130,7 +130,7 @@ fn render_jsx_attrs(chars: &[char], from: usize) -> Result<(String, usize, bool)
 
 /// True if a JSX `{...}` hole's inner text is nothing but whitespace and JS
 /// comments, as in `{/* comment */}`. Real JSX treats such holes as valid
-/// children that render nothing; naively splicing them into an `` html`` ``
+/// children that render nothing; naively splicing them into an `html`
 /// template as `${/* comment */}` produces an empty template expression,
 /// which is a JS syntax error, so these holes must be dropped entirely.
 fn is_comment_only_hole(inner: &str) -> bool {
@@ -220,7 +220,7 @@ fn parse_children(chars: &[char], from: usize, tag_name: &str, is_fragment: bool
 }
 
 /// Parses one JSX element or fragment starting at `chars[start] == '<'`,
-/// returning its rendered `html``-template text and the index one past its
+/// returning its rendered `html`-template text and the index one past its
 /// closing tag.
 fn parse_element(chars: &[char], start: usize) -> Result<(String, usize), JsxError> {
 	if chars.get(start + 1) == Some(&'>') {
@@ -669,14 +669,14 @@ async fn load_module_body(
 	}
 
 	// 6. Transpile JSX syntax into html`...` calls
-	let js_code = crate::jsx::transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js_code = transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
 	// 7. Map arguments and execute via the AsyncFunction constructor, so the
 	// module body can use top-level `await`.
 	let param_names = js_sys::Object::keys(&imports);
 	let param_values = js_sys::Object::values(&imports);
 
-	let fn_body = format!("{}\nreturn exports;\n//# sourceURL={}", js_code, resolved_url);
+	let fn_body = format!("{js_code}\nreturn exports;\n//# sourceURL={resolved_url}");
 
 	let args = js_sys::Array::new();
 	args.push(&"exports".into());

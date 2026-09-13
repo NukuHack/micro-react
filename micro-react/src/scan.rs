@@ -36,6 +36,7 @@ pub(crate) fn skip_html_doctype(chars: &[char], i: usize) -> Option<usize> {
 
 /// Scans a tag name starting at `start` (right after `<` or `</`), returning
 /// the index one past the last name character.
+#[must_use]
 pub fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
 	let n = chars.len();
 	let mut j = start;
@@ -97,6 +98,7 @@ pub(crate) fn scan_html_tag_end(chars: &[char], from: usize) -> TagEnd {
 /// `${...}` holes with arbitrary nested code (including more strings and
 /// braces); those are skipped via [`find_matching_brace`] rather than by
 /// naively scanning for the next backtick.
+#[must_use]
 pub fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
 	let quote = *chars.get(i)?;
 	if !matches!(quote, '\'' | '"' | '`') {
@@ -109,7 +111,7 @@ pub fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
 			'\\' => j += 2,
 			c if c == quote => return Some(j + 1),
 			'$' if quote == '`' && chars.get(j + 1) == Some(&'{') => {
-				j = find_matching_brace(chars, j + 1).map(|close| close + 1).unwrap_or(n);
+				j = find_matching_brace(chars, j + 1).map_or(n, |close| close + 1);
 			}
 			_ => j += 1,
 		}
@@ -120,6 +122,7 @@ pub fn skip_js_string(chars: &[char], i: usize) -> Option<usize> {
 /// If `chars[i..]` starts a `//` or `/* */` JS comment, returns the index
 /// just past its end (end-of-line for `//`, past `*/` for block comments —
 /// or end-of-input if unterminated).
+#[must_use]
 pub fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
 	let n = chars.len();
 	if chars[i..].starts_with(&['/', '/']) {
@@ -143,6 +146,7 @@ pub fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
 /// at a literal `{`), skipping over nested braces, JS strings/template
 /// literals, and comments so characters inside them can't corrupt the
 /// balance count. Returns `None` if the input ends before the brace closes.
+#[must_use]
 pub fn find_matching_brace(chars: &[char], open: usize) -> Option<usize> {
 	debug_assert_eq!(chars.get(open), Some(&'{'));
 	let n = chars.len();

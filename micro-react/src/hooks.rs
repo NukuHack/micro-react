@@ -1,6 +1,17 @@
 //! React-style hooks (useState, useEffect, useMemo, etc.) backed by a
 //! per-component slot vector. Hook order must stay stable across renders,
 //! matching the same rule React itself imposes on hook calls.
+//!
+//! This module deliberately reaches through a raw `*mut ComponentInst`
+//! (via the `hooks_ref!`/`hook_idx!`/etc. macros below) instead of going
+//! through `RefCell::borrow_mut` for the instance's hook slots. That's so a
+//! hook callback (e.g. a `setState` invoked synchronously mid-render) can
+//! mutate the instance without tripping a reentrant-borrow panic. WASM is
+//! single-threaded and each raw pointer is only ever valid for the
+//! duration of the render that produced it, so this is sound, but it is a
+//! module-wide, load-bearing exception to `unsafe_code` rather than a
+//! series of ad-hoc allows.
+#![allow(unsafe_code)]
 
 use std::{
 	cell::RefCell,
@@ -21,13 +32,13 @@ pub struct ComponentInst {
 	pub parent_dom: Option<web_sys::Element>,
 	pub error_setter: Option<Rc<dyn Fn(JsValue)>>,
 
-	/// The nearest ancestor ErrorBoundary as of this instance's last full
+	/// The nearest ancestor `ErrorBoundary` as of this instance's last full
 	/// diff pass (see `hooks::current_boundary` / `report_to_nearest_boundary`).
 	/// Persisted (unlike `BOUNDARY_STACK`, which only reflects the *current*
 	/// render-call window) so a failure from this component's own later,
 	/// independent re-render — triggered by its own setState outside of any
 	/// boundary's active render pass — can still find the right boundary.
-	pub nearest_boundary: Option<Weak<RefCell<ComponentInst>>>,
+	pub nearest_boundary: Option<Weak<RefCell<Self>>>,
 
 	/// Bumped at the start of every render of this instance. Lets a
 	/// reentrant render (triggered mid-diff by a synchronous setState)
@@ -42,9 +53,44 @@ pub struct ComponentInst {
 	pub last_vnode: Option<VNode>,
 }
 
+impl std::fmt::Debug for ComponentInst {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		/// Renders an `Option<Rc<dyn Fn(JsValue)>>` without requiring
+		/// the (unsized, non-`Debug`) closure to implement `Debug`.
+		struct OpaqueSetter<'a>(&'a Option<Rc<dyn Fn(JsValue)>>);
+
+		impl std::fmt::Debug for OpaqueSetter<'_> {
+			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				match self.0 {
+					Some(_) => f.write_str("Some(<closure>)"),
+					None => f.write_str("None"),
+				}
+			}
+		}
+
+		f.debug_struct("ComponentInst")
+			.field("hooks", &self.hooks)
+			.field("hook_idx", &self.hook_idx)
+			.field("dirty", &self.dirty)
+			.field("unmounted", &self.unmounted)
+			.field("depth", &self.depth)
+			.field("parent_dom", &self.parent_dom)
+			.field("error_setter", &OpaqueSetter(&self.error_setter))
+			.field("nearest_boundary", &self.nearest_boundary)
+			.field("render_generation", &self.render_generation)
+			.field("render_fn", &self.render_fn)
+			.field("last_props", &self.last_props)
+			.field("last_parent_dom", &self.last_parent_dom)
+			.field("last_ns", &self.last_ns)
+			.field("last_vnode", &self.last_vnode)
+			.finish()
+	}
+}
+
 impl ComponentInst {
+	#[must_use]
 	pub fn new() -> Self {
-		ComponentInst {
+		Self {
 			hooks: Vec::new(),
 			hook_idx: 0,
 			dirty: false,
@@ -61,7 +107,7 @@ impl ComponentInst {
 			last_vnode: None,
 		}
 	}
-	pub fn reset_hooks(&mut self) {
+	pub const fn reset_hooks(&mut self) {
 		self.hook_idx = 0;
 	}
 }
@@ -87,7 +133,72 @@ pub enum HookSlot {
 	Id { value: String },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+// Note: remove `#[derive(Debug)]` from the enum declaration.
+impl std::fmt::Debug for HookSlot {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		/// Renders a value that can't (or shouldn't) be `Debug`-printed
+		/// as `<label>`. `T` is `?Sized` so `dyn Any` / `dyn FnOnce()` work.
+		struct Opaque<'a, T: ?Sized>(&'a T, &'static str);
+
+		impl<T: ?Sized> std::fmt::Debug for Opaque<'_, T> {
+			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				write!(f, "<{}>", self.1)
+			}
+		}
+
+		/// Same, but for `Option<T>`. Keeps the useful "is it set?" signal
+		/// without naming the closure payload. `T: Sized` because `Option<T>`
+		/// requires it — that's fine here since callers pass `Box<dyn …>`.
+		struct OptOpaque<'a, T>(&'a Option<T>, &'static str);
+
+		impl<T> std::fmt::Debug for OptOpaque<'_, T> {
+			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+				match self.0 {
+					Some(_) => write!(f, "Some(<{}>)", self.1),
+					None => f.write_str("None"),
+				}
+			}
+		}
+
+		match self {
+			Self::State { value } => f.debug_struct("State").field("value", &Opaque(value, "AnyCell")).finish(),
+
+			Self::Reducer { value } => f.debug_struct("Reducer").field("value", &Opaque(value, "AnyCell")).finish(),
+
+			Self::Effect { deps, cleanup, pending } => f
+				.debug_struct("Effect")
+				.field("deps", deps)
+				.field("cleanup", &OptOpaque(cleanup, "CleanupFn"))
+				.field("pending", &OptOpaque(pending, "PendingEffectFn"))
+				.finish(),
+
+			Self::LayoutEffect { deps, cleanup, pending } => f
+				.debug_struct("LayoutEffect")
+				.field("deps", deps)
+				.field("cleanup", &OptOpaque(cleanup, "CleanupFn"))
+				.field("pending", &OptOpaque(pending, "PendingEffectFn"))
+				.finish(),
+
+			// Assumes `NodeRef: Debug`. If not, swap for
+			// `.field("value", &Opaque(value, "NodeRef"))`.
+			Self::Ref { value } => f.debug_struct("Ref").field("value", value).finish(),
+
+			Self::RefVal { value } => f.debug_struct("RefVal").field("value", &Opaque(value, "AnyCell")).finish(),
+
+			Self::Memo { value, deps } => f
+				.debug_struct("Memo")
+				// `Rc<dyn Any>` → deref to `&dyn Any` so `Opaque` can
+				// accept it as an unsized `T`.
+				.field("value", &Opaque(&**value, "dyn Any"))
+				.field("deps", deps)
+				.finish(),
+
+			Self::Id { value } => f.debug_struct("Id").field("value", value).finish(),
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepVal(pub String);
 
 // ─── Current component (thread-local dispatcher) ───
@@ -98,12 +209,14 @@ thread_local! {
 	pub(crate) static CURRENT_WEAK: RefCell<Option<Weak<RefCell<ComponentInst>>>> = const { RefCell::new(None) };
 }
 
+#[must_use]
 pub fn current_inst() -> *mut ComponentInst {
 	CURRENT_INST.with(|c| c.borrow().expect("hook called outside component"))
 }
 
 /// A `Weak` handle to the component instance currently rendering. Use this
 /// instead of `current_inst()` in closures that outlive the render call.
+#[must_use]
 pub fn current_weak() -> Weak<RefCell<ComponentInst>> {
 	CURRENT_WEAK.with(|c| c.borrow().clone().expect("hook called outside component"))
 }
@@ -130,6 +243,7 @@ thread_local! {
 }
 
 /// See `BOUNDARY_ABSORBED` above. Read-and-clear.
+#[must_use]
 pub fn take_boundary_absorbed() -> bool {
 	BOUNDARY_ABSORBED.with(|f| {
 		let v = *f.borrow();
@@ -149,16 +263,17 @@ pub fn pop_boundary() {
 }
 
 /// The boundary currently on top of `BOUNDARY_STACK`, i.e. the nearest
-/// ancestor ErrorBoundary that is actively diffing its subtree right now.
+/// ancestor `ErrorBoundary` that is actively diffing its subtree right now.
 /// Called by `diff_component` on *every* component (not just failing ones)
 /// to persist onto `ComponentInst::nearest_boundary`, so the association
 /// with the ancestor boundary survives beyond this one render-call window —
 /// see the doc comment on that field for why that matters.
+#[must_use]
 pub fn current_boundary() -> Option<Weak<RefCell<ComponentInst>>> {
 	BOUNDARY_STACK.with(|s| s.borrow().last().cloned())
 }
 
-/// Hand a render/reconciliation failure to the nearest live ErrorBoundary
+/// Hand a render/reconciliation failure to the nearest live `ErrorBoundary`
 /// ancestor of `origin` — the component instance whose render (or whose
 /// subtree's reconciliation) just failed. Returns true if a boundary
 /// accepted it, false if the caller should fall back to logging.
@@ -201,7 +316,7 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 	// The setter above only schedules a re-render for the next microtask,
 	// which isn't guaranteed to run before paint. Force it now so the
 	// fallback UI appears in this same synchronous pass.
-	crate::diff::rerender_component(inst_rc);
+	crate::diff::rerender_component(&inst_rc);
 
 	// The boundary's DOM subtree has now been replaced by the fallback UI;
 	// tell the still-unwinding failing component not to touch it.
@@ -223,19 +338,24 @@ pub fn forward_to_ancestor_boundary(inst: &Rc<RefCell<ComponentInst>>, err: JsVa
 	let Some(target) = inst.borrow().nearest_boundary.clone().and_then(|w| w.upgrade()) else { return false };
 	let Some(setter) = target.borrow().error_setter.clone() else { return false };
 	setter(err);
-	crate::diff::rerender_component(target);
+	crate::diff::rerender_component(&target);
 	BOUNDARY_ABSORBED.with(|f| *f.borrow_mut() = true);
 	true
 }
 
 // ─── helper: get &hooks safely through raw ptr ───
 // SAFETY: WASM is single-threaded; inst is valid for the duration of a render.
+// These macros/fn go through a raw pointer (rather than `RefCell::borrow`)
+// specifically to avoid reentrant-borrow panics while a hook callback is
+// itself mutating `ComponentInst` (e.g. a setter invoked synchronously
+// during render). This is a deliberate, load-bearing use of `unsafe`, so
+// it is explicitly allowed here rather than fixed away.
 macro_rules! hooks_ref {
 	($inst:expr) => {
 		unsafe { &(*$inst).hooks }
 	};
 }
-#[inline(always)]
+#[inline]
 unsafe fn hooks_get_mut(inst: *mut ComponentInst, idx: usize) -> &'static mut HookSlot {
 	unsafe { &mut (&mut (*inst).hooks)[idx] }
 }
@@ -284,7 +404,7 @@ pub fn use_state_cell<T: Clone + 'static>(initial: T) -> (T, AnyCell, Rc<dyn Fn(
 
 	let value_rc = match &hooks_ref!(inst)[idx] {
 		HookSlot::State { value } => value.clone(),
-		_ => panic!("hook type mismatch at {}", idx),
+		_ => unreachable!("hook type mismatch at {idx}"),
 	};
 
 	let current = value_rc.borrow().downcast_ref::<T>().expect("state type mismatch").clone();
@@ -295,7 +415,7 @@ pub fn use_state_cell<T: Clone + 'static>(initial: T) -> (T, AnyCell, Rc<dyn Fn(
 	let cell_for_setter = value_rc.clone();
 	let setter: Rc<dyn Fn(T)> = Rc::new(move |next: T| {
 		*cell_for_setter.borrow_mut() = Box::new(next);
-		enqueue_render(weak.clone());
+		enqueue_render(&weak);
 	});
 
 	(current, value_rc, setter)
@@ -322,7 +442,7 @@ where
 
 	let value_rc = match &hooks_ref!(inst)[idx] {
 		HookSlot::Reducer { value } => value.clone(),
-		_ => panic!("hook type mismatch"),
+		_ => unreachable!("hook type mismatch"),
 	};
 
 	let current = value_rc.borrow().downcast_ref::<S>().expect("state type set by this hook").clone();
@@ -334,7 +454,7 @@ where
 		let old = cell_for_dispatch.borrow().downcast_ref::<S>().expect("state type set by this hook").clone();
 		let next = reducer(old, action);
 		*cell_for_dispatch.borrow_mut() = Box::new(next);
-		enqueue_render(weak.clone());
+		enqueue_render(&weak);
 	});
 
 	(current, value_rc, dispatch)
@@ -439,7 +559,7 @@ pub fn use_memo<T: Clone + 'static>(factory: impl FnOnce() -> T, deps: Option<Ve
 
 	match &hooks_ref!(inst)[idx] {
 		HookSlot::Memo { value, .. } => value.downcast_ref::<T>().expect("memo type set by this hook").clone(),
-		_ => panic!("hook type mismatch"),
+		_ => unreachable!("hook type mismatch"),
 	}
 }
 
@@ -467,7 +587,7 @@ pub fn use_ref_cell<T: 'static>(initial: impl FnOnce() -> T) -> AnyCell {
 
 	match &hooks_ref!(inst)[idx] {
 		HookSlot::RefVal { value } => value.clone(),
-		_ => panic!("hook type mismatch at {}", idx),
+		_ => unreachable!("hook type mismatch at {idx}"),
 	}
 }
 
@@ -486,7 +606,7 @@ pub fn use_id() -> String {
 
 	match &hooks_ref!(inst)[idx] {
 		HookSlot::Id { value } => value.clone(),
-		_ => panic!("hook type mismatch"),
+		_ => unreachable!("hook type mismatch"),
 	}
 }
 

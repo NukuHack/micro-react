@@ -125,7 +125,7 @@ fn js_use_ref_object_identity_is_stable_and_current_survives_rerenders() {
 	let comp = ComponentFn::infallible(move |_props: Props| {
 		let (tick, set_tick) = use_state(0i32);
 		*setter_slot_for_comp.borrow_mut() = Some(set_tick);
-		let obj = js_use_ref(JsValue::from_str("init"));
+		let obj = js_use_ref(&JsValue::from_str("init"));
 		seen_refs_for_comp.borrow_mut().push(obj.clone());
 		if tick == 0 {
 			// Mutate `.current` on the very first render; a later render
@@ -176,7 +176,7 @@ fn js_use_memo_only_calls_the_js_factory_when_deps_actually_change() {
 		.into_js_value()
 		.unchecked_into();
 
-		let _ = js_use_memo(&factory, deps);
+		let _ = js_use_memo(&factory, &deps);
 		VNode::text(tick.to_string())
 	});
 	root.render(VNode::component("MemoHook", comp, vec![])).unwrap();
@@ -216,7 +216,7 @@ fn js_use_callback_keeps_the_first_functions_identity_until_deps_change() {
 		let marker = tick;
 		let f: js_sys::Function = Closure::wrap(Box::new(move || -> i32 { marker }) as Box<dyn Fn() -> i32>).into_js_value().unchecked_into();
 
-		let result = js_use_callback(&f, deps);
+		let result = js_use_callback(&f, &deps);
 		seen_for_comp.borrow_mut().push(result);
 		VNode::text(tick.to_string())
 	});

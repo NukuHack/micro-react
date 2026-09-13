@@ -1,6 +1,18 @@
 //! SPA router exposed to JS as Router/Link/useLocation/useNavigate.
 //! Routes are matched by path pattern (":param" segments, "*" catch-all)
 //! against the browser's current location.
+//!
+//! The `js_*` component functions below (`js_router`, `js_link`, etc.) all
+//! take `props: JsValue` by value rather than `&JsValue`. That's
+//! deliberate, not an oversight `clippy::needless_pass_by_value` should
+//! flag: every JS-callable "component" in this crate shares the single
+//! shape `fn(JsValue) -> JsValue`, and callers (in particular
+//! `create_element`'s function-component path, and this crate's own tests)
+//! rely on being able to pass these functions around as that bare,
+//! non-capturing `fn` type. Narrowing an individual component's
+//! parameter to `&JsValue` would break that uniform calling convention
+//! for a copy that's cheap to begin with.
+#![allow(clippy::needless_pass_by_value)]
 
 use js_sys::{Array, Function, Object, Reflect};
 use std::cell::RefCell;
@@ -15,12 +27,14 @@ use crate::vnode::{PropVal, VNode, VNodeInner};
 // ─── Pattern matching ───
 
 /// Compiled route pattern.
+#[derive(Debug)]
 pub struct Pattern {
 	param_names: Vec<String>,
 	regex: String,
 }
 
 impl Pattern {
+	#[must_use]
 	pub fn compile(pattern: &str) -> Self {
 		let mut names = Vec::new();
 		let mut regex = String::from("^");
@@ -41,10 +55,11 @@ impl Pattern {
 		}
 		regex.push_str("(?:/)?$");
 
-		Pattern { param_names: names, regex }
+		Self { param_names: names, regex }
 	}
 
 	/// Returns `Some(params)` if `path` matches, `None` otherwise.
+	#[must_use]
 	pub fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
 		// Uses JS RegExp via js_sys since the `regex` crate is too heavy for WASM. Cached per
 		// pattern string (like html.rs's per-call-site template cache) since Router/Link
@@ -159,6 +174,7 @@ fn route_entries(routes: &JsValue) -> Vec<(String, JsValue)> {
 /// `[pattern, fn]` pairs; see `route_entries` for the tradeoff between the
 /// two when it comes to match order.
 #[wasm_bindgen(js_name = Router)]
+#[must_use]
 pub fn js_router(props: JsValue) -> JsValue {
 	let routes_obj = Reflect::get(&props, &"routes".into()).unwrap_or(JsValue::NULL);
 
@@ -230,13 +246,13 @@ pub fn js_router(props: JsValue) -> JsValue {
 	let _ = Reflect::set(&loc_obj, &"state".into(), &nav_state);
 	ROUTER_CTX.with(|ctx| ctx.set_value(loc_obj.into()));
 
-	match matched_fn {
-		Some(f) => f.call0(&JsValue::NULL).unwrap_or(JsValue::NULL),
-		None => {
+	matched_fn.map_or_else(
+		|| {
 			let vn = VNode::tag("p").text("404 Not Found").build();
 			vnode_to_js(vn).unwrap_or(JsValue::NULL)
-		}
-	}
+		},
+		|f| f.call0(&JsValue::NULL).unwrap_or(JsValue::NULL),
+	)
 }
 
 /// `Link({ to, class/className, target, rel, state, children })` — an anchor
@@ -246,6 +262,7 @@ pub fn js_router(props: JsValue) -> JsValue {
 /// `<a>`/React Router behavior. `state` is passed through to
 /// `history.pushState` and surfaces as `useLocation().state`.
 #[wasm_bindgen(js_name = Link)]
+#[must_use]
 pub fn js_link(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
 	// `html` authoring uses real HTML attribute names (`class`, not
@@ -397,6 +414,7 @@ pub fn js_use_location() -> JsValue {
 /// Memoized with empty deps so the underlying `Closure` is created once per
 /// component instance instead of leaking a new one on every render.
 #[wasm_bindgen(js_name = useNavigate)]
+#[must_use]
 pub fn js_use_navigate() -> JsValue {
 	use_memo(
 		|| {
@@ -469,7 +487,7 @@ impl RouteEntry {
 /// exact same mutable slot. `diff_component`/`unmount_vnode` write and clear
 /// that slot as instances mount/unmount, so without this, one route's mount
 /// or unmount can silently clobber another's live component instance,
-/// eventually handing the reconciler a stale `_dom` reference and producing
+/// eventually handing the reconciler a stale `dom_node` reference and producing
 /// an `insertBefore` failure. Giving each clone its own fresh slot keeps
 /// every activation's component identity independent, as intended.
 fn fresh_instance(vnode: &VNode) -> VNode {
@@ -479,10 +497,7 @@ fn fresh_instance(vnode: &VNode) -> VNode {
 			*inst = crate::vnode::ComponentInstSlot::new();
 			*children = children.iter().map(fresh_instance).collect();
 		}
-		VNodeInner::Element { children, .. } => {
-			children.0 = children.0.iter().map(fresh_instance).collect();
-		}
-		VNodeInner::Fragment { children, .. } | VNodeInner::Portal { children, .. } => {
+		VNodeInner::Element { children, .. } | VNodeInner::Fragment { children, .. } | VNodeInner::Portal { children, .. } => {
 			children.0 = children.0.iter().map(fresh_instance).collect();
 		}
 		VNodeInner::Text(_) | VNodeInner::Null => {}
@@ -498,9 +513,10 @@ fn fresh_instance(vnode: &VNode) -> VNode {
 /// important for guarded/redirect routes. `state` is passed through to
 /// `history.pushState`/`replaceState` and surfaces as `useLocation().state`.
 #[wasm_bindgen(js_name = Navigate)]
+#[must_use]
 pub fn js_navigate(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
-	let replace = Reflect::get(&props, &"replace".into()).ok().map(|v| v.is_truthy()).unwrap_or(false);
+	let replace = Reflect::get(&props, &"replace".into()).ok().is_some_and(|v| v.is_truthy());
 	let state = Reflect::get(&props, &"state".into()).unwrap_or(JsValue::NULL);
 	// Reduced to a JSON string purely for the effect's dependency
 	// comparison, same caveat as `Link`'s memo dep above.
@@ -535,6 +551,7 @@ pub fn js_navigate(props: JsValue) -> JsValue {
 /// anything is rendered. Rendered standalone, outside `<Routes>`, it just
 /// falls back to rendering its own `element`.
 #[wasm_bindgen(js_name = Route)]
+#[must_use]
 pub fn js_route(props: JsValue) -> JsValue {
 	Reflect::get(&props, &"element".into()).unwrap_or(JsValue::NULL)
 }
@@ -544,6 +561,7 @@ pub fn js_route(props: JsValue) -> JsValue {
 /// inside a route rendered by `<Routes>`. The optional `context` prop is
 /// published for the rendered subtree to read via `useOutletContext()`.
 #[wasm_bindgen(js_name = Outlet)]
+#[must_use]
 pub fn js_outlet(props: JsValue) -> JsValue {
 	let context = Reflect::get(&props, &"context".into()).unwrap_or(JsValue::UNDEFINED);
 	OUTLET_CTX.with(|ctx| ctx.set_value(context));
@@ -631,10 +649,7 @@ fn collect_routes(nodes: &[VNode], parent_path: &str, ancestors: &[VNode], out: 
 			}
 		}
 
-		let full_path = match &path {
-			Some(p) => join_path(parent_path, p),
-			None => parent_path.to_string(),
-		};
+		let full_path = path.as_ref().map_or_else(|| parent_path.to_string(), |p| join_path(parent_path, p));
 
 		if children.is_empty() {
 			let Some(leaf) = element else { continue };

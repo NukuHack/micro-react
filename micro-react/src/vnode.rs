@@ -1,4 +1,4 @@
-//! VNode tree + fluent element builder. A Template stores only the static
+//! `VNode` tree + fluent element builder. A Template stores only the static
 //! skeleton (tag + static attrs) of an Element; dynamic values live in
 //! `holes`/`props` and are resolved at diff time.
 
@@ -29,12 +29,12 @@ pub enum PropVal {
 impl PartialEq for PropVal {
 	fn eq(&self, other: &Self) -> bool {
 		match (self, other) {
-			(PropVal::Str(a), PropVal::Str(b)) => a == b,
-			(PropVal::Bool(a), PropVal::Bool(b)) => a == b,
-			(PropVal::Num(a), PropVal::Num(b)) => a == b,
-			(PropVal::Null, PropVal::Null) => true,
-			(PropVal::Callback(a), PropVal::Callback(b)) => js_sys::Object::is(a.as_ref(), b.as_ref()),
-			(PropVal::Js(a), PropVal::Js(b)) => js_sys::Object::is(a, b),
+			(Self::Str(a), Self::Str(b)) => a == b,
+			(Self::Bool(a), Self::Bool(b)) => a == b,
+			(Self::Num(a), Self::Num(b)) => a == b,
+			(Self::Null, Self::Null) => true,
+			(Self::Callback(a), Self::Callback(b)) => js_sys::Object::is(a.as_ref(), b.as_ref()),
+			(Self::Js(a), Self::Js(b)) => js_sys::Object::is(a, b),
 			_ => false,
 		}
 	}
@@ -42,37 +42,37 @@ impl PartialEq for PropVal {
 
 impl From<&str> for PropVal {
 	fn from(s: &str) -> Self {
-		PropVal::Str(s.to_string())
+		Self::Str(s.to_string())
 	}
 }
 impl From<String> for PropVal {
 	fn from(s: String) -> Self {
-		PropVal::Str(s)
+		Self::Str(s)
 	}
 }
 impl From<bool> for PropVal {
 	fn from(b: bool) -> Self {
-		PropVal::Bool(b)
+		Self::Bool(b)
 	}
 }
 impl From<f64> for PropVal {
 	fn from(n: f64) -> Self {
-		PropVal::Num(n)
+		Self::Num(n)
 	}
 }
 impl From<i32> for PropVal {
 	fn from(n: i32) -> Self {
-		PropVal::Num(n as f64)
+		Self::Num(f64::from(n))
 	}
 }
 impl From<usize> for PropVal {
 	fn from(n: usize) -> Self {
-		PropVal::Num(n as f64)
+		Self::Num(n as f64)
 	}
 }
 impl From<JsCallback> for PropVal {
 	fn from(f: JsCallback) -> Self {
-		PropVal::Callback(f)
+		Self::Callback(f)
 	}
 }
 
@@ -86,17 +86,17 @@ impl AsRef<JsValue> for JsCallback {
 }
 impl From<js_sys::Function> for JsCallback {
 	fn from(f: js_sys::Function) -> Self {
-		JsCallback(f)
+		Self(f)
 	}
 }
 impl From<&js_sys::Function> for JsCallback {
 	fn from(f: &js_sys::Function) -> Self {
-		JsCallback(f.clone())
+		Self(f.clone())
 	}
 }
 
 // ─── Template — the static part of an Element, cached on the vnode ───
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Template {
 	pub id: u64,
 	pub tag: String,
@@ -104,7 +104,7 @@ pub struct Template {
 
 impl Template {
 	pub fn new(tag: impl Into<String>) -> Self {
-		Template { id: next_id(), tag: tag.into() }
+		Self { id: next_id(), tag: tag.into() }
 	}
 }
 
@@ -117,10 +117,12 @@ pub type Key = Option<String>;
 pub struct Children(pub Vec<VNode>);
 
 impl Children {
-	pub fn len(&self) -> usize {
+	#[must_use]
+	pub const fn len(&self) -> usize {
 		self.0.len()
 	}
-	pub fn is_empty(&self) -> bool {
+	#[must_use]
+	pub const fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
 }
@@ -168,10 +170,10 @@ pub struct VNode {
 	/// Monotonically increasing id for bailing out on unchanged subtrees.
 	pub original: u64,
 	// Reconciler bookkeeping (set by diff engine, not by user).
-	pub(crate) _dom: Option<web_sys::Node>,
-	pub(crate) _depth: u32,
-	pub(crate) _index: i32,
-	pub(crate) _flags: u8,
+	pub(crate) dom_node: Option<web_sys::Node>,
+	pub(crate) depth: u32,
+	pub(crate) order_index: i32,
+	pub(crate) flags: u8,
 }
 
 pub const FLAG_INSERT: u8 = 1 << 0;
@@ -179,47 +181,51 @@ pub const FLAG_MATCHED: u8 = 1 << 1;
 
 impl VNode {
 	fn new(inner: VNodeInner) -> Self {
-		VNode { inner, original: next_id(), _dom: None, _depth: 0, _index: -1, _flags: 0 }
+		Self { inner, original: next_id(), dom_node: None, depth: 0, order_index: -1, flags: 0 }
 	}
 
+	#[must_use]
 	pub fn null() -> Self {
-		VNode::new(VNodeInner::Null)
+		Self::new(VNodeInner::Null)
 	}
 
 	pub fn text(s: impl Into<String>) -> Self {
-		VNode::new(VNodeInner::Text(s.into()))
+		Self::new(VNodeInner::Text(s.into()))
 	}
 
 	/// Start building an element: `VNode::tag("div")`.
 	pub fn tag(tag: impl Into<String>) -> ElementBuilder {
-		ElementBuilder::new(tag.into())
+		ElementBuilder::new(&tag.into())
 	}
 
-	pub fn fragment(children: Vec<VNode>) -> Self {
-		VNode::new(VNodeInner::Fragment { children: Children(children), key: None })
+	#[must_use]
+	pub fn fragment(children: Vec<Self>) -> Self {
+		Self::new(VNodeInner::Fragment { children: Children(children), key: None })
 	}
 
-	pub fn fragment_keyed(key: impl Into<String>, children: Vec<VNode>) -> Self {
-		VNode::new(VNodeInner::Fragment { children: Children(children), key: Some(key.into()) })
+	pub fn fragment_keyed(key: impl Into<String>, children: Vec<Self>) -> Self {
+		Self::new(VNodeInner::Fragment { children: Children(children), key: Some(key.into()) })
 	}
 
 	/// Render `children` into a different DOM `container` than the one the
 	/// portal vnode itself sits in. No JS-facing binding constructs this
 	/// yet (see `bindings.rs`'s `create_element`), so Rust callers/tests
 	/// build it directly via this constructor.
-	pub fn portal(container: Element, children: Vec<VNode>) -> Self {
-		VNode::new(VNodeInner::Portal { container, children: Children(children) })
+	#[must_use]
+	pub fn portal(container: Element, children: Vec<Self>) -> Self {
+		Self::new(VNodeInner::Portal { container, children: Children(children) })
 	}
 
 	pub fn component(name: impl Into<String>, render: ComponentFn, props: Props) -> Self {
-		VNode::new(VNodeInner::Component { name: name.into(), render, props, children: Vec::new(), key: None, inst: ComponentInstSlot::new() })
+		Self::new(VNodeInner::Component { name: name.into(), render, props, children: Vec::new(), key: None, inst: ComponentInstSlot::new() })
 	}
 
 	/// Attaches raw JSX children to a `Component` vnode after construction
 	/// (mirrors `with_key`). Used by `createElement`/`html!` so callers like
 	/// `Routes` can walk a component tree (e.g. nested `<Route>`s) without
 	/// invoking any component function.
-	pub fn with_children(mut self, children: Vec<VNode>) -> Self {
+	#[must_use]
+	pub fn with_children(mut self, children: Vec<Self>) -> Self {
 		if let VNodeInner::Component { children: c, .. } = &mut self.inner {
 			*c = children;
 		}
@@ -229,6 +235,7 @@ impl VNode {
 	/// Set this vnode's key after construction. Needed for `Component`
 	/// vnodes, which have no builder step to pass a key through, so a
 	/// `key` prop (e.g. `h(ErrorBoundary, { key })`) would otherwise be dropped.
+	#[must_use]
 	pub fn with_key(mut self, key: Option<String>) -> Self {
 		match &mut self.inner {
 			VNodeInner::Element { key: k, .. } | VNodeInner::Fragment { key: k, .. } | VNodeInner::Component { key: k, .. } => *k = key,
@@ -237,15 +244,15 @@ impl VNode {
 		self
 	}
 
+	#[must_use]
 	pub fn key(&self) -> Option<&str> {
 		match &self.inner {
-			VNodeInner::Element { key, .. } => key.as_deref(),
-			VNodeInner::Fragment { key, .. } => key.as_deref(),
-			VNodeInner::Component { key, .. } => key.as_deref(),
+			VNodeInner::Element { key, .. } | VNodeInner::Fragment { key, .. } | VNodeInner::Component { key, .. } => key.as_deref(),
 			_ => None,
 		}
 	}
 
+	#[must_use]
 	pub fn type_tag(&self) -> Option<&str> {
 		match &self.inner {
 			VNodeInner::Element { template, .. } => Some(&template.tag),
@@ -272,16 +279,17 @@ impl fmt::Debug for NodeRef {
 }
 
 impl NodeRef {
+	#[must_use]
 	pub fn new() -> Self {
-		NodeRef { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: None }
+		Self { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: None }
 	}
-	/// Create a NodeRef that calls `sync` (with the new node, or `None` on
+	/// Create a `NodeRef` that calls `sync` (with the new node, or `None` on
 	/// unmount) every time the DOM node it's attached to changes.
 	pub fn with_sync(sync: impl Fn(Option<web_sys::Node>) + 'static) -> Self {
-		NodeRef { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: Some(std::rc::Rc::new(sync)) }
+		Self { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: Some(std::rc::Rc::new(sync)) }
 	}
 	pub(crate) fn set(&self, node: Option<web_sys::Node>) {
-		*self.node.borrow_mut() = node.clone();
+		self.node.borrow_mut().clone_from(&node);
 		if let Some(f) = &self.sync {
 			f(node);
 		}
@@ -304,12 +312,12 @@ impl fmt::Debug for ComponentFn {
 impl ComponentFn {
 	/// The primary constructor, for a component that may throw.
 	pub fn new(f: impl Fn(Props) -> Result<VNode, JsValue> + 'static) -> Self {
-		ComponentFn(std::rc::Rc::new(f))
+		Self(std::rc::Rc::new(f))
 	}
 	/// Convenience constructor for the common case of a component that
 	/// never throws.
 	pub fn infallible(f: impl Fn(Props) -> VNode + 'static) -> Self {
-		ComponentFn(std::rc::Rc::new(move |props| Ok(f(props))))
+		Self(std::rc::Rc::new(move |props| Ok(f(props))))
 	}
 	pub fn call(&self, props: Props) -> Result<VNode, JsValue> {
 		(self.0)(props)
@@ -321,8 +329,9 @@ impl ComponentFn {
 pub struct ComponentInstSlot(pub std::rc::Rc<std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<crate::hooks::ComponentInst>>>>>);
 
 impl ComponentInstSlot {
+	#[must_use]
 	pub fn new() -> Self {
-		ComponentInstSlot(std::rc::Rc::new(std::cell::RefCell::new(None)))
+		Self(std::rc::Rc::new(std::cell::RefCell::new(None)))
 	}
 }
 
@@ -333,6 +342,7 @@ impl fmt::Debug for ComponentInstSlot {
 }
 
 // ─── ElementBuilder — fluent builder that produces a VNode::Element ───
+#[derive(Clone, Debug)]
 pub struct ElementBuilder {
 	template: Template,
 	props: Props,
@@ -342,47 +352,56 @@ pub struct ElementBuilder {
 }
 
 impl ElementBuilder {
-	pub fn new(tag: String) -> Self {
-		ElementBuilder { template: Template::new(&tag), props: Vec::new(), children: Vec::new(), key: None, ref_: None }
+	#[must_use]
+	pub fn new(tag: &str) -> Self {
+		Self { template: Template::new(tag), props: Vec::new(), children: Vec::new(), key: None, ref_: None }
 	}
 
 	/// Set any attribute, e.g. `.attr("className", "foo")`.
+	#[must_use]
 	pub fn attr(mut self, name: impl Into<String>, value: impl Into<PropVal>) -> Self {
 		self.props.push((name.into(), value.into()));
 		self
 	}
 
 	/// Set an event handler. `name` should be React-style camelCase, e.g. "onClick".
+	#[must_use]
 	pub fn on(self, name: impl Into<String>, handler: js_sys::Function) -> Self {
 		self.attr(name.into(), PropVal::Callback(JsCallback(handler)))
 	}
 
 	/// Set a `key` for keyed reconciliation.
+	#[must_use]
 	pub fn key(mut self, k: impl Into<String>) -> Self {
 		self.key = Some(k.into());
 		self
 	}
 
-	/// Attach a NodeRef.
+	/// Attach a `NodeRef`.
+	#[must_use]
 	pub fn ref_(mut self, r: NodeRef) -> Self {
 		self.ref_ = Some(r);
 		self
 	}
 
+	#[must_use]
 	pub fn child(mut self, c: VNode) -> Self {
 		self.children.push(c);
 		self
 	}
 
+	#[must_use]
 	pub fn children(mut self, cs: impl IntoIterator<Item = VNode>) -> Self {
 		self.children.extend(cs);
 		self
 	}
 
+	#[must_use]
 	pub fn text(self, t: impl Into<String>) -> Self {
 		self.child(VNode::text(t))
 	}
 
+	#[must_use]
 	pub fn build(self) -> VNode {
 		VNode::new(VNodeInner::Element {
 			template: self.template,
@@ -396,7 +415,7 @@ impl ElementBuilder {
 
 /// Allow `.build()` to be omitted in most contexts.
 impl From<ElementBuilder> for VNode {
-	fn from(b: ElementBuilder) -> VNode {
+	fn from(b: ElementBuilder) -> Self {
 		b.build()
 	}
 }

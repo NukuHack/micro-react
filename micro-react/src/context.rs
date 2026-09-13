@@ -23,7 +23,7 @@ pub fn record_create_context_call() -> u64 {
 	CTX_CREATE_COUNT.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Maps context_id -> list of waker callbacks.
+/// Maps `context_id` -> list of waker callbacks.
 type ListenerMap = HashMap<u64, Vec<Rc<dyn Fn()>>>;
 
 thread_local! {
@@ -35,7 +35,7 @@ thread_local! {
 
 /// A context object created by `Context::new(default_value)`.
 /// Clone this to share the context across components.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Context<T: Clone + 'static> {
 	pub id: u64,
 	pub default_value: T,
@@ -43,7 +43,7 @@ pub struct Context<T: Clone + 'static> {
 
 impl<T: Clone + 'static> Context<T> {
 	pub fn new(default_value: T) -> Self {
-		Context { id: CTX_ID_SEQ.fetch_add(1, Ordering::Relaxed), default_value }
+		Self { id: CTX_ID_SEQ.fetch_add(1, Ordering::Relaxed), default_value }
 	}
 
 	/// Get the current value from the registry (or default).
@@ -95,7 +95,7 @@ pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
 	let ctx_id = ctx.id;
 	let weak = current_weak();
 	let waker: Rc<dyn Fn()> = Rc::new(move || {
-		enqueue_render(weak.clone());
+		enqueue_render(&weak);
 	});
 
 	// Register the subscription in a useEffect (runs once, cleans up on
@@ -103,7 +103,7 @@ pub fn use_context<T: Clone + 'static>(ctx: &Context<T>) -> T {
 	// is the effect's cleanup, so it actually runs instead of being
 	// dropped immediately — otherwise CTX_LISTENERS grows without bound.
 	let ctx_clone = ctx.clone();
-	use_effect(move || ctx_clone.subscribe(waker), Some(vec![DepVal(format!("ctx_{}", ctx_id))]));
+	use_effect(move || ctx_clone.subscribe(waker), Some(vec![DepVal(format!("ctx_{ctx_id}"))]));
 
 	value
 }

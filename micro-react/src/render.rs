@@ -1,4 +1,4 @@
-//! render() creates and mounts a root — mirrors the React 18 root API.
+//! `render()` creates and mounts a root — mirrors the React 18 root API.
 
 use wasm_bindgen::prelude::*;
 use web_sys::{Element, Node};
@@ -8,15 +8,16 @@ use crate::scheduler::{run_effects, run_layout_effects};
 use crate::vnode::{Children, VNode, VNodeInner};
 
 // ─── Root ───
-
+#[derive(Debug)]
 pub struct Root {
 	container: Element,
 	root_vnode: Option<VNode>,
 }
 
 impl Root {
-	pub fn new(container: Element) -> Self {
-		Root { container, root_vnode: None }
+	#[must_use]
+	pub const fn new(container: Element) -> Self {
+		Self { container, root_vnode: None }
 	}
 
 	pub fn render(&mut self, vnode: VNode) -> Result<(), JsValue> {
@@ -31,10 +32,10 @@ impl Root {
 		let mut new_root = VNode {
 			inner: VNodeInner::Fragment { children: Children(vec![vnode]), key: None },
 			original: crate::vnode::next_id(),
-			_dom: None,
-			_depth: 0,
-			_index: 0,
-			_flags: 0,
+			dom_node: None,
+			depth: 0,
+			order_index: 0,
+			flags: 0,
 		};
 
 		if let Some(old_root) = &self.root_vnode {
@@ -51,7 +52,7 @@ impl Root {
 
 			// Append any nodes that aren't yet in the DOM
 			for child in &children {
-				if let Some(dom) = &child._dom
+				if let Some(dom) = &child.dom_node
 					&& dom.parent_node().is_none()
 				{
 					container_node.append_child(dom)?;

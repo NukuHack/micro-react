@@ -1,6 +1,6 @@
-//! Reconciler: walks old/new VNode trees and patches the DOM using a
-//! Preact-style skew diff with keyed matching. Entry points: diff_node(),
-//! diff_children(), rerender_component().
+//! Reconciler: walks old/new `VNode` trees and patches the DOM using a
+//! Preact-style skew diff with keyed matching. Entry points: `diff_node()`,
+//! `diff_children()`, `rerender_component()`.
 
 use js_sys::{Array, Function, Object, Reflect};
 use std::rc::Rc;
@@ -18,6 +18,7 @@ const MATH_NS: &str = "http://www.w3.org/1998/Math/MathML";
 use std::cell::RefCell;
 
 /// Every function-component vnode gets one of these.
+#[derive(Debug)]
 pub struct ComponentNode {
 	pub inst: Rc<RefCell<ComponentInst>>,
 	pub render: ComponentFn,
@@ -47,7 +48,7 @@ fn release_depth() {
 }
 
 /// RAII guard around a `guard_depth()` increment, so a panic unwinding
-/// through the stack still releases it instead of permanently leaking RENDER_DEPTH.
+/// through the stack still releases it instead of permanently leaking `RENDER_DEPTH`.
 struct DepthGuard;
 impl Drop for DepthGuard {
 	fn drop(&mut self) {
@@ -57,13 +58,8 @@ impl Drop for DepthGuard {
 
 /// Extract a human-readable message from a caught panic payload.
 fn panic_message(e: &(dyn std::any::Any + Send + 'static)) -> String {
-	if let Some(s) = e.downcast_ref::<&str>() {
-		s.to_string()
-	} else if let Some(s) = e.downcast_ref::<String>() {
-		s.clone()
-	} else {
-		"unknown panic".to_string()
-	}
+	e.downcast_ref::<&str>()
+		.map_or_else(|| e.downcast_ref::<String>().map_or_else(|| "unknown panic".to_string(), String::clone), |s| (*s).to_string())
 }
 
 // ─── diff_node — main recursive entry ───
@@ -78,13 +74,13 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 	match &new_vnode.inner {
 		VNodeInner::Null => {
 			// A component can render `null` after a throw (createElement
-			// substitutes VNode::null() on error). Unmount any old subtree properly instead of just dropping our _dom, so hooks/effects don't leak.
+			// substitutes VNode::null() on error). Unmount any old subtree properly instead of just dropping our dom_node, so hooks/effects don't leak.
 			if let Some(old) = old_vnode
 				&& !matches!(old.inner, VNodeInner::Null)
 			{
 				unmount_vnode(old, false);
 			}
-			new_vnode._dom = None;
+			new_vnode.dom_node = None;
 			Ok(None)
 		}
 
@@ -92,19 +88,19 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 			let text = text.clone();
 			// Reuse existing text node if possible
 			if let Some(old) = old_vnode
-				&& let Some(existing) = &old._dom
+				&& let Some(existing) = &old.dom_node
 				&& let Ok(txt) = existing.clone().dyn_into::<Text>()
 			{
 				if txt.data() != text {
 					txt.set_data(&text);
 				}
-				new_vnode._dom = Some(txt.into());
-				return Ok(new_vnode._dom.clone());
+				new_vnode.dom_node = Some(txt.into());
+				return Ok(new_vnode.dom_node.clone());
 			}
 			let doc = document();
 			let txt = doc.create_text_node(&text);
 			let node: Node = txt.into();
-			new_vnode._dom = Some(node.clone());
+			new_vnode.dom_node = Some(node.clone());
 			Ok(Some(node))
 		}
 
@@ -135,11 +131,11 @@ fn diff_fragment(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VN
 	let mut new_children = children;
 	diff_children(parent_dom, &mut new_children, &old_children, ns, None)?;
 
-	new_vnode._dom = new_children.first().and_then(|c| c._dom.clone());
+	new_vnode.dom_node = new_children.first().and_then(|c| c.dom_node.clone());
 	if let VNodeInner::Fragment { children: c, .. } = &mut new_vnode.inner {
 		*c = Children(new_children);
 	}
-	Ok(new_vnode._dom.clone())
+	Ok(new_vnode.dom_node.clone())
 }
 
 // ─── Portal ───
@@ -154,7 +150,7 @@ fn diff_portal(new_vnode: &mut VNode, old_vnode: Option<&VNode>, ns: &str) -> Re
 		_ => None,
 	});
 
-	let container_node: Node = container.clone().into();
+	let container_node: Node = container.into();
 
 	// If the portal's target container is the *same* one as last render,
 	// diff_children can reuse/reorder the previous children's DOM nodes in
@@ -190,7 +186,7 @@ fn diff_portal(new_vnode: &mut VNode, old_vnode: Option<&VNode>, ns: &str) -> Re
 	if let VNodeInner::Portal { children: c, .. } = &mut new_vnode.inner {
 		*c = Children(new_children);
 	}
-	new_vnode._dom = None;
+	new_vnode.dom_node = None;
 	Ok(None)
 }
 
@@ -207,7 +203,7 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 	// Namespace propagation
 	let ns = effective_ns(&tag, ns);
 
-	let old_elem = old_vnode.and_then(|o| o._dom.clone().and_then(|n| n.dyn_into::<Element>().ok()));
+	let old_elem = old_vnode.and_then(|o| o.dom_node.clone().and_then(|n| n.dyn_into::<Element>().ok()));
 
 	// Set to `None` if we end up creating a brand new DOM element below (tag
 	// mismatch), since at that point the old vnode's subtree — including any
@@ -247,7 +243,7 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 			// mismatch inside the vnode it rendered — so without splicing
 			// here the old node would leak in the DOM forever and the new
 			// one would never appear.
-			let stale_dom: Option<Node> = old_vnode.and_then(|o| o._dom.clone());
+			let stale_dom: Option<Node> = old_vnode.and_then(|o| o.dom_node.clone());
 			if let Some(old) = old_vnode {
 				unmount_vnode(old, true);
 			}
@@ -313,7 +309,7 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 			dom_node.set_text_content(None);
 		}
 		let mut ch = children;
-		let child_ns = if tag == "foreignObject" { "html".to_string() } else { ns.clone() };
+		let child_ns = if tag == "foreignObject" { "html".to_string() } else { ns };
 		diff_children(&dom_node, &mut ch, &old_children, &child_ns, None)?;
 		ch
 	};
@@ -323,8 +319,8 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 		r.set(Some(dom.clone().into()));
 	}
 
-	let dom_node: Node = dom.clone().into();
-	new_vnode._dom = Some(dom_node.clone());
+	let dom_node: Node = dom.into();
+	new_vnode.dom_node = Some(dom_node.clone());
 
 	if let VNodeInner::Element { children: c, .. } = &mut new_vnode.inner {
 		*c = Children(new_children);
@@ -353,7 +349,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// Captured before unmount_vnode below (skip_remove=true leaves it
 	// attached) so we can atomically swap it for the freshly-mounted DOM
 	// once that's ready, instead of leaving it as a permanent orphan.
-	let stale_dom: Option<Node> = if type_mismatch { old_vnode.and_then(|o| o._dom.clone()) } else { None };
+	let stale_dom: Option<Node> = if type_mismatch { old_vnode.and_then(|o| o.dom_node.clone()) } else { None };
 	if type_mismatch {
 		// Tear the mismatched instance down properly (effect cleanups etc.)
 		// instead of leaking it or letting it silently masquerade as this
@@ -379,10 +375,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 		_ => None,
 	});
 
-	let inst_rc: Rc<RefCell<ComponentInst>> = match reused_inst {
-		Some(inst) => inst,
-		None => Rc::new(RefCell::new(ComponentInst::new())),
-	};
+	let inst_rc: Rc<RefCell<ComponentInst>> = reused_inst.unwrap_or_else(|| Rc::new(RefCell::new(ComponentInst::new())));
 
 	// The instance's own previous output, not the matched old vnode itself
 	// (which is just a stand-in for "did we mount before").
@@ -390,7 +383,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 
 	let my_generation = {
 		let mut inst = inst_rc.borrow_mut();
-		inst.depth = new_vnode._depth;
+		inst.depth = new_vnode.depth;
 		inst.parent_dom = parent_dom.clone().dyn_into::<Element>().ok();
 		inst.reset_hooks();
 		inst.dirty = false;
@@ -433,7 +426,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	};
 
 	let mut rendered = render_result;
-	rendered._depth = new_vnode._depth + 1;
+	rendered.depth = new_vnode.depth + 1;
 
 	// Persist render_fn/props/parent_dom/ns before diffing children: a first
 	// mount whose child throws immediately needs render_fn set already, or
@@ -441,7 +434,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	{
 		let mut inst = inst_rc.borrow_mut();
 		inst.render_fn = Some(render.clone());
-		inst.last_props = props.clone();
+		inst.last_props.clone_from(&props);
 		inst.last_parent_dom = Some(parent_dom.clone());
 		inst.last_ns = ns.to_string();
 		// Persist the ambient boundary (ComponentInst::nearest_boundary) so a
@@ -467,7 +460,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 		// Reflect the instance's true current DOM, not this call's discarded
 		// `rendered`, so the parent's vnode tree (used for key matching)
 		// still points at real, live DOM instead of going stale.
-		new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+		new_vnode.dom_node = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v.dom_node.clone());
 		if let VNodeInner::Component { inst: slot, .. } = &new_vnode.inner {
 			*slot.0.borrow_mut() = Some(inst_rc);
 		}
@@ -511,7 +504,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 				inst.last_vnode = Some(rendered);
 			}
 		}
-		new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+		new_vnode.dom_node = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v.dom_node.clone());
 		if let VNodeInner::Component { inst: slot, .. } = &new_vnode.inner {
 			*slot.0.borrow_mut() = Some(inst_rc);
 		}
@@ -536,7 +529,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// Same reasoning as the absorbed-path above: reflect the instance's true
 	// current DOM rather than this call's possibly-stale `dom`, so the
 	// parent's tree always has an accurate reference for this slot.
-	new_vnode._dom = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v._dom.clone());
+	new_vnode.dom_node = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v.dom_node.clone());
 
 	// Finish the swap started above: the mismatched old node (if any) is
 	// still attached at its original position. Splice the new one in right
@@ -544,7 +537,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// directly, so this doesn't depend on (or disturb) whatever anchor an
 	// ancestor diff_children loop is currently holding.
 	if let Some(stale) = stale_dom {
-		if let Some(new_dom) = &new_vnode._dom {
+		if let Some(new_dom) = &new_vnode.dom_node {
 			parent_dom.insert_before(new_dom, Some(&stale))?;
 		}
 		if let Some(p) = stale.parent_node() {
@@ -563,7 +556,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 
 // ─── rerender_component — called by the scheduler for dirty instances ───
 
-pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
+pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 	let my_generation = {
 		let mut i = inst_rc.borrow_mut();
 		i.dirty = false;
@@ -587,7 +580,7 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 
 	// Same reasoning as diff_component: raw pointer valid only for this call.
 	let inst_ptr = inst_rc.as_ptr();
-	let inst_weak = Rc::downgrade(&inst_rc);
+	let inst_weak = Rc::downgrade(inst_rc);
 
 	let render_call_result: Result<VNode, JsValue> =
 		match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_inst(inst_ptr, inst_weak, || render_fn.call(props)))) {
@@ -601,21 +594,21 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 	let mut rendered = match render_call_result {
 		Ok(vnode) => vnode,
 		Err(err) => {
-			if !crate::hooks::report_to_nearest_boundary(&inst_rc, err.clone()) {
+			if crate::hooks::report_to_nearest_boundary(inst_rc, err.clone()) {
+				// BOUNDARY_ABSORBED was set, but this path skips the
+				// take_boundary_absorbed() check below, so it would leak
+				// into an unrelated later boundary's first mount otherwise.
+				let _ = crate::hooks::take_boundary_absorbed();
+			} else {
 				crate::console_error!(
 					"[micro-react] uncaught error in component render (no boundary above): {}",
 					crate::bindings::stringify_thrown(&err)
 				);
-			} else {
-				// BOUNDARY_ABSORBED was set, but this path skips the
-				// take_boundary_absorbed() check below, so it would leak
-				// into an unrelated later boundary's first mount otherwise.
-				crate::hooks::take_boundary_absorbed();
 			}
 			return;
 		}
 	};
-	rendered._depth = depth + 1;
+	rendered.depth = depth + 1;
 
 	// Same reasoning as in diff_component: if an ancestor ErrorBoundary
 	// already absorbed this throw, our old DOM node was repurposed by its
@@ -630,7 +623,7 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 
 	let is_boundary = inst_rc.borrow().error_setter.is_some();
 	if is_boundary {
-		crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
+		crate::hooks::push_boundary(Rc::downgrade(inst_rc));
 	}
 	// See the matching catch_unwind in diff_component: reconciliation itself
 	// (not just render) needs to be panic-safe, since this is the call that
@@ -641,7 +634,7 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 			Err(e) => {
 				let msg = panic_message(&*e);
 				crate::console_error!("[micro-react] reconciliation panicked: {}", msg);
-				if !crate::hooks::report_to_nearest_boundary(&inst_rc, JsValue::from_str(&msg)) {
+				if !crate::hooks::report_to_nearest_boundary(inst_rc, JsValue::from_str(&msg)) {
 					crate::console_error!("[micro-react] uncaught reconciliation panic (no boundary above): {}", msg);
 				}
 				Ok(None)
@@ -680,7 +673,7 @@ pub fn rerender_component(inst_rc: Rc<RefCell<ComponentInst>>) {
 // ─── diff_children — Preact skew algorithm ───
 
 /// Walks into Fragment/Component subtrees to find the last real DOM node a
-/// vnode occupies. `_dom` on a Fragment/Component only ever holds its
+/// vnode occupies. `dom_node` on a Fragment/Component only ever holds its
 /// *first* node, which isn't enough to anchor the sibling that follows a
 /// multi-node child — see the call site in `diff_children`.
 fn last_dom_of(vnode: &VNode) -> Option<Node> {
@@ -688,7 +681,7 @@ fn last_dom_of(vnode: &VNode) -> Option<Node> {
 		VNodeInner::Fragment { children, .. } => children.0.iter().rev().find_map(last_dom_of),
 		VNodeInner::Component { inst, .. } => inst.0.borrow().as_ref().and_then(|i| i.borrow().last_vnode.as_ref().and_then(last_dom_of)),
 		VNodeInner::Portal { .. } | VNodeInner::Null => None,
-		VNodeInner::Element { .. } | VNodeInner::Text(_) => vnode._dom.clone(),
+		VNodeInner::Element { .. } | VNodeInner::Text(_) => vnode.dom_node.clone(),
 	}
 }
 
@@ -725,7 +718,7 @@ pub fn diff_children(
 				skew += 1;
 			}
 			if is_insertable {
-				new_children[i]._flags |= FLAG_INSERT;
+				new_children[i].flags |= FLAG_INSERT;
 			}
 		} else if idx != skewed {
 			if idx == skewed - 1 {
@@ -739,37 +732,37 @@ pub fn diff_children(
 					skew += 1;
 				}
 				if is_insertable {
-					new_children[i]._flags |= FLAG_INSERT;
+					new_children[i].flags |= FLAG_INSERT;
 				}
 			}
 		}
 	}
 
 	// Phase 2: diff each child
-	let mut old_dom: Option<Node> = old_children.first().and_then(|c| c._dom.clone());
+	let mut old_dom: Option<Node> = old_children.first().and_then(|c| c.dom_node.clone());
 
 	for i in 0..new_len {
 		let cv = &mut new_children[i];
 		let idx = match_indices[i];
-		cv._index = i as i32;
+		cv.order_index = i as i32;
 
 		let old_vn = if idx >= 0 { old_children.get(idx as usize) } else { None };
 
-		let result_dom = diff_node(parent_dom, cv, old_vn, ns)?;
+		let _ = diff_node(parent_dom, cv, old_vn, ns)?;
 
 		// Components are excluded from pre-diff FLAG_INSERT since their shape
 		// doesn't reflect what they render; use post-diff attachment instead.
-		let already_attached = cv._dom.as_ref().and_then(|d| d.parent_node()).is_some_and(|p| p.is_same_node(Some(parent_dom)));
-		let should_insert = (cv._flags & FLAG_INSERT) != 0 || !already_attached;
+		let already_attached = cv.dom_node.as_ref().and_then(Node::parent_node).is_some_and(|p| p.is_same_node(Some(parent_dom)));
+		let should_insert = (cv.flags & FLAG_INSERT) != 0 || !already_attached;
 
-		if should_insert && let Some(dom) = &cv._dom {
+		if should_insert && let Some(dom) = &cv.dom_node {
 			parent_dom.insert_before(dom, old_dom.as_ref())?;
 		}
 		if let Some(last) = last_dom_of(cv) {
 			old_dom = last.next_sibling();
 		}
 
-		cv._flags &= !(FLAG_INSERT | FLAG_MATCHED);
+		cv.flags &= !(FLAG_INSERT | FLAG_MATCHED);
 	}
 
 	// Phase 3: unmount leftover old children
@@ -864,14 +857,14 @@ pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
 	}
 
 	if !skip_remove
-		&& let Some(dom) = &vnode._dom
+		&& let Some(dom) = &vnode.dom_node
 		&& let Some(parent) = dom.parent_node()
 	{
 		let _ = parent.remove_child(dom);
 	}
 }
 
-fn vnode_ref(vnode: &VNode) -> Option<&NodeRef> {
+const fn vnode_ref(vnode: &VNode) -> Option<&NodeRef> {
 	match &vnode.inner {
 		VNodeInner::Element { ref_, .. } => ref_.as_ref(),
 		_ => None,
@@ -1070,13 +1063,13 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 
 	// Generic attr
 	match value {
-		PropVal::Null => dom.remove_attribute(key)?,
-		PropVal::Bool(false) => dom.remove_attribute(key)?,
+		PropVal::Null | PropVal::Bool(false) => dom.remove_attribute(key)?,
 		PropVal::Str(s) => dom.set_attribute(key, s)?,
 		PropVal::Bool(true) => dom.set_attribute(key, "")?,
 		PropVal::Num(n) => dom.set_attribute(key, &n.to_string())?,
-		PropVal::Callback(_) => {} // ignore non-event function props
-		PropVal::Js(_) => {}       // arbitrary objects/arrays aren't valid DOM attribute values
+		// Callback: ignore non-event function props. Js: arbitrary
+		// objects/arrays aren't valid DOM attribute values either.
+		PropVal::Callback(_) | PropVal::Js(_) => {}
 	}
 	Ok(())
 }
@@ -1135,19 +1128,16 @@ fn js_style_obj_to_css_text(obj: &JsValue) -> String {
 	if !obj.is_object() {
 		return String::new();
 	}
-	let o = match obj.dyn_ref::<Object>() {
-		Some(o) => o,
-		None => return String::new(),
+	let Some(o) = obj.dyn_ref::<Object>() else {
+		return String::new();
 	};
 	let mut out = String::new();
 	for key in Object::keys(o).iter() {
-		let key_str = match key.as_string() {
-			Some(s) => s,
-			None => continue,
+		let Some(key_str) = key.as_string() else {
+			continue;
 		};
-		let val = match Reflect::get(obj, &key) {
-			Ok(v) => v,
-			Err(_) => continue,
+		let Ok(val) = Reflect::get(obj, &key) else {
+			continue;
 		};
 		if val.is_null() || val.is_undefined() {
 			continue;
@@ -1156,7 +1146,7 @@ fn js_style_obj_to_css_text(obj: &JsValue) -> String {
 			s
 		} else if let Some(n) = val.as_f64() {
 			// React treats bare numbers as px for most props; good enough here.
-			format!("{}px", n)
+			format!("{n}px")
 		} else {
 			continue;
 		};
@@ -1207,7 +1197,6 @@ fn ns_uri(ns: &str) -> Option<&str> {
 	match ns {
 		"svg" => Some(SVG_NS),
 		"math" => Some(MATH_NS),
-		"html" | "" => None,
 		_ => None,
 	}
 }

@@ -55,7 +55,7 @@ fn tpl_with_array(reuse: &Array, statics: &[&str], values: Vec<JsValue>) -> JsVa
 	for val in values {
 		v.push(&val);
 	}
-	html_template(s, v).expect("html_template should compile and substitute without error")
+	html_template(&s, &v).expect("html_template should compile and substitute without error")
 }
 
 fn mount(vnode: JsValue) -> (web_sys::Element, JsRoot) {

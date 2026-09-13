@@ -1,5 +1,5 @@
 //! Microtask-batched rerender scheduler (architecture mirrors Preact's).
-//! setState/dispatch push into DIRTY_QUEUE, flushed depth-first on the
+//! setState/dispatch push into `DIRTY_QUEUE`, flushed depth-first on the
 //! next microtask.
 
 use std::{
@@ -30,7 +30,8 @@ thread_local! {
 }
 
 /// Points back to the component + hook index so a flush can retrieve the
-/// pending callback/cleanup that schedule_effect_inner() stored on the hook.
+/// pending callback/cleanup that `schedule_effect_inner()` stored on the hook.
+#[derive(Debug)]
 pub struct EffectSlot {
 	pub inst: Weak<RefCell<ComponentInst>>,
 	pub idx: usize,
@@ -38,7 +39,7 @@ pub struct EffectSlot {
 
 /// Mark a component instance as dirty and schedule a flush. Takes a `Weak`
 /// so a setState call after unmount becomes a no-op instead of touching freed memory.
-pub fn enqueue_render(inst: Weak<RefCell<ComponentInst>>) {
+pub fn enqueue_render(inst: &Weak<RefCell<ComponentInst>>) {
 	let Some(rc) = inst.upgrade() else { return };
 
 	let (already_dirty, unmounted) = {
@@ -162,17 +163,14 @@ pub fn flush_rerenders() {
 					.filter_map(|(i, w)| w.upgrade().map(|rc| (i, rc.borrow().depth)))
 					.min_by_key(|(_, depth)| *depth)
 					.map(|(i, _)| i);
-				match idx {
-					Some(i) => {
-						let w = q.swap_remove(i);
-						if let Some(rc) = w.upgrade() {
-							return Some(rc);
-						}
+				if let Some(i) = idx {
+					let w = q.swap_remove(i);
+					if let Some(rc) = w.upgrade() {
+						return Some(rc);
 					}
-					None => {
-						q.clear();
-						return None;
-					}
+				} else {
+					q.clear();
+					return None;
 				}
 			}
 		});
@@ -182,7 +180,7 @@ pub fn flush_rerenders() {
 			i.dirty && !i.unmounted
 		};
 		if should_render {
-			crate::diff::rerender_component(rc);
+			crate::diff::rerender_component(&rc);
 		}
 	}
 
@@ -193,21 +191,21 @@ pub fn flush_rerenders() {
 pub fn run_layout_effects() {
 	let slots: Vec<EffectSlot> = PENDING_LAYOUT_EFFECTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
 	for slot in slots {
-		run_one_effect(slot.inst, slot.idx, true);
+		run_one_effect(&slot.inst, slot.idx, true);
 	}
 }
 
 pub fn run_effects() {
 	let slots: Vec<EffectSlot> = PENDING_EFFECTS.with(|q| std::mem::take(&mut *q.borrow_mut()));
 	for slot in slots {
-		run_one_effect(slot.inst, slot.idx, false);
+		run_one_effect(&slot.inst, slot.idx, false);
 	}
 }
 
 /// Run the cleanup + pending callback on hooks[idx], then store the
 /// returned cleanup back. `inst` is `Weak` since the component may have
 /// unmounted by the time this runs.
-fn run_one_effect(inst: Weak<RefCell<ComponentInst>>, idx: usize, is_layout: bool) {
+fn run_one_effect(inst: &Weak<RefCell<ComponentInst>>, idx: usize, is_layout: bool) {
 	let Some(rc) = inst.upgrade() else { return };
 	if rc.borrow().unmounted {
 		return;
