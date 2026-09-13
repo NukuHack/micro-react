@@ -12,7 +12,7 @@
 //! surface (`compile` + `matches`) exactly as `router.rs`'s own
 //! `js_router` does, rather than reaching into internals.
 
-use js_sys::{Array, Object, Reflect};
+use js_sys::{Array, Function, Object, Reflect};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
@@ -23,7 +23,7 @@ use wasm_bindgen_test::*;
 use micro_react::bindings::create_element;
 use micro_react::hooks::use_state;
 use micro_react::render::Root;
-use micro_react::router::{Pattern, js_link, js_route, js_router, js_routes, js_use_navigate};
+use micro_react::router::{Pattern, js_link, js_route, js_router, js_routes, js_use_location, js_use_navigate};
 use micro_react::scheduler::flush_rerenders;
 use micro_react::vnode::{ComponentFn, Props, VNode};
 
@@ -332,10 +332,7 @@ fn link_with_non_self_target_does_not_hijack_navigation() {
 	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
 	anchor.dispatch_event(&ev).expect("dispatch should succeed");
 
-	assert!(
-		!ev.default_prevented(),
-		"Link should not call preventDefault for a target other than \"_self\", so the browser can open it normally"
-	);
+	assert!(!ev.default_prevented(), "Link should not call preventDefault for a target other than \"_self\", so the browser can open it normally");
 }
 
 // A `target="_self"` (or no `target` at all) is functionally the same
@@ -355,6 +352,71 @@ fn link_with_self_target_still_navigates_client_side() {
 	anchor.dispatch_event(&ev).expect("dispatch should succeed");
 
 	assert!(ev.default_prevented(), "Link should still call preventDefault and navigate client-side when target is \"_self\"");
+}
+
+// ─── `Link`'s `state` prop passes through to `useLocation().state` ───
+//
+// Wires up a real `<Router>` around a route handler that (a) reports the
+// current `useLocation().state` back to the test via a captured cell, and
+// (b) renders a `<Link to="/" state={...}>`. Clicking that Link should push
+// the given state onto `history` and, once `Router`'s popstate listener
+// picks that up and re-renders, the handler should observe the new state —
+// exercising the whole round trip, not just `js_link` in isolation.
+#[wasm_bindgen_test]
+fn link_state_prop_round_trips_through_use_location() {
+	set_path("/");
+	let container = make_container();
+	let router_fn = wrap_as_js_component(js_router, "Router");
+	let link_fn = wrap_as_js_component(js_link, "Link");
+
+	let captured: Rc<RefCell<JsValue>> = Rc::new(RefCell::new(JsValue::UNDEFINED));
+	let captured_for_handler = captured.clone();
+	let link_fn_for_handler = link_fn.clone();
+
+	let handler = Closure::wrap(Box::new(move || -> JsValue {
+		let location = js_use_location();
+		let state = Reflect::get(&location, &"state".into()).unwrap_or(JsValue::NULL);
+		*captured_for_handler.borrow_mut() = state;
+
+		let payload = Object::new();
+		let _ = Reflect::set(&payload, &"via".into(), &JsValue::from_str("link"));
+		let link_props = Object::new();
+		let _ = Reflect::set(&link_props, &"to".into(), &JsValue::from_str("/"));
+		let _ = Reflect::set(&link_props, &"state".into(), &payload);
+		let _ = Reflect::set(&link_props, &"children".into(), &JsValue::from_str("Home"));
+		create_element(&link_fn_for_handler, &link_props, JsValue::NULL).expect("createElement should succeed")
+	}) as Box<dyn Fn() -> JsValue>)
+	.into_js_value();
+
+	let routes = Array::new();
+	let pair = Array::new();
+	pair.push(&JsValue::from_str("/"));
+	pair.push(&handler);
+	routes.push(&pair);
+
+	let vnode = create_element(&router_fn, &router_props_from(&routes.into()), JsValue::NULL).expect("createElement should succeed");
+	let root = micro_react::bindings::render(vnode, container.clone()).expect("render should succeed");
+
+	assert!(
+		captured.borrow().is_null() || captured.borrow().is_undefined(),
+		"expected no state before any navigation has pushed one, matching a fresh history.state"
+	);
+
+	let anchor = container.query_selector("a").expect("query should not error").expect("expected an <a> element");
+	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
+	anchor.dispatch_event(&ev).expect("dispatch should succeed");
+	flush_rerenders();
+
+	let got_via = Reflect::get(&captured.borrow(), &"via".into()).ok().and_then(|v| v.as_string());
+	assert_eq!(
+		got_via.as_deref(),
+		Some("link"),
+		"expected the state pushed by Link's onclick to surface via useLocation().state after Router's \
+		 popstate listener re-renders, not to stay JsValue::NULL"
+	);
+
+	root.unmount();
+	container.remove();
 }
 
 // ─── Routes recomputes its route table when children change ───
@@ -488,7 +550,7 @@ fn router_props_from(routes: &JsValue) -> JsValue {
 
 // Mirrors what `Link`/`NavLink`'s onclick handler actually does: push a new
 // history entry, then dispatch a synthetic `popstate` so `Router`'s own
-// listener (registered via `use_effect_nodrop` inside `js_router`) picks up
+// listener (registered via `use_effect` inside `js_router`) picks up
 // the change and re-renders — *without* the parent ever calling
 // `root.render()` again, so `<Routes>`'s `props.children` is the exact same
 // `JsValue` object across both renders.
@@ -496,6 +558,87 @@ fn navigate_via_popstate(path: &str) {
 	set_path(path);
 	let window = web_sys::window().expect("window should be available");
 	window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).expect("dispatch should succeed");
+}
+
+// ─── Router removes its popstate listener on unmount ───
+//
+// `Router`'s popstate listener used to be registered with `.forget()` and
+// never removed, leaking one `window` listener per mount. This wraps
+// `window.addEventListener`/`removeEventListener` to count `"popstate"`
+// (de)registrations — while still delegating to the originals so the
+// listener genuinely works — and checks mount/unmount leaves them balanced.
+#[wasm_bindgen_test]
+fn router_removes_its_popstate_listener_on_unmount() {
+	set_path("/");
+	let container = make_container();
+	let router_fn = wrap_as_js_component(js_router, "Router");
+
+	let window = web_sys::window().expect("window should be available");
+	let window_val: JsValue = window.clone().into();
+	let original_add: Function = Reflect::get(&window_val, &"addEventListener".into()).expect("should exist").unchecked_into();
+	let original_remove: Function = Reflect::get(&window_val, &"removeEventListener".into()).expect("should exist").unchecked_into();
+
+	let add_count: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
+	let remove_count: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
+
+	let wrapped_add = {
+		let add_count = add_count.clone();
+		let original_add = original_add.clone();
+		let window = window.clone();
+		Closure::wrap(Box::new(move |event_type: JsValue, listener: JsValue, opts: JsValue| {
+			if event_type.as_string().as_deref() == Some("popstate") {
+				*add_count.borrow_mut() += 1;
+			}
+			let _ = original_add.call3(&window.clone().into(), &event_type, &listener, &opts);
+		}) as Box<dyn Fn(JsValue, JsValue, JsValue)>)
+		.into_js_value()
+	};
+	let wrapped_remove = {
+		let remove_count = remove_count.clone();
+		let original_remove = original_remove.clone();
+		let window = window.clone();
+		Closure::wrap(Box::new(move |event_type: JsValue, listener: JsValue, opts: JsValue| {
+			if event_type.as_string().as_deref() == Some("popstate") {
+				*remove_count.borrow_mut() += 1;
+			}
+			let _ = original_remove.call3(&window.clone().into(), &event_type, &listener, &opts);
+		}) as Box<dyn Fn(JsValue, JsValue, JsValue)>)
+		.into_js_value()
+	};
+
+	let _ = Reflect::set(&window_val, &"addEventListener".into(), &wrapped_add);
+	let _ = Reflect::set(&window_val, &"removeEventListener".into(), &wrapped_remove);
+
+	// RAII guard so the patched `window.addEventListener`/`removeEventListener`
+	// are always restored — even if an assertion below panics — instead of
+	// leaking the patch into every other test that shares this page's `window`.
+	// This project's tests run with `panic = "unwind"` specifically so `Drop`
+	// guards like this fire during unwinding (see Cargo.toml).
+	struct RestoreListeners {
+		window_val: JsValue,
+		original_add: Function,
+		original_remove: Function,
+	}
+	impl Drop for RestoreListeners {
+		fn drop(&mut self) {
+			let _ = Reflect::set(&self.window_val, &"addEventListener".into(), &self.original_add);
+			let _ = Reflect::set(&self.window_val, &"removeEventListener".into(), &self.original_remove);
+		}
+	}
+	let _guard = RestoreListeners { window_val: window_val.clone(), original_add: original_add.clone(), original_remove: original_remove.clone() };
+
+	let vnode = create_element(&router_fn, &router_props_from(&Array::new().into()), JsValue::NULL).expect("createElement should succeed");
+	let root = micro_react::bindings::render(vnode, container.clone()).expect("render should succeed");
+
+	assert_eq!(*add_count.borrow(), 1, "expected Router to register exactly one popstate listener on mount");
+	assert_eq!(*remove_count.borrow(), 0, "expected no popstate listener removal before unmount");
+
+	root.unmount();
+
+	assert_eq!(*remove_count.borrow(), 1, "expected Router to remove its popstate listener on unmount instead of leaking it via .forget()");
+
+	drop(_guard);
+	container.remove();
 }
 
 // ─── Regression: internal navigation must not double-consume Routes' props ───

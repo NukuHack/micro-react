@@ -9,7 +9,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::bindings::{js_to_vnode, js_to_vnode_peek, vnode_to_js};
 use crate::context::Context;
-use crate::hooks::{DepVal, use_effect_nodrop, use_memo, use_state};
+use crate::hooks::{DepVal, use_effect, use_effect_nodrop, use_memo, use_state};
 use crate::vnode::{PropVal, VNode, VNodeInner};
 
 // ─── Pattern matching ───
@@ -93,18 +93,19 @@ fn regex_escape(s: &str) -> String {
 // ─── JS-visible bindings ───
 
 thread_local! {
-	/// Shared location context: { path, search, params }
+	/// Shared location context: { pathname, search, params, state }
 	static ROUTER_CTX: Context<JsValue> = Context::new(JsValue::NULL);
 }
 
-fn current_location() -> (String, String) {
+fn current_location() -> (String, String, JsValue) {
 	let Some(window) = web_sys::window() else {
 		crate::console_warn!("[micro-react] Router: no window available, defaulting location to \"/\"");
-		return ("/".to_string(), String::new());
+		return ("/".to_string(), String::new(), JsValue::NULL);
 	};
 	let path = window.location().pathname().unwrap_or_else(|_| "/".to_string());
 	let search = window.location().search().unwrap_or_default();
-	(path, search)
+	let state = window.history().and_then(|h| h.state()).unwrap_or(JsValue::NULL);
+	(path, search, state)
 }
 
 /// Yields `(pattern, handler)` pairs from a `routes` value in the order
@@ -150,7 +151,9 @@ fn route_entries(routes: &JsValue) -> Vec<(String, JsValue)> {
 }
 
 /// `Router({ routes })` matches the current URL against the given path
-/// patterns and provides `{ path, search, params }` via the location context.
+/// patterns and provides `{ pathname, search, params, state }` via the
+/// location context, where `state` mirrors `history.state` (see `Link`'s
+/// `state` prop and `Navigate`'s `state` prop for how it gets set).
 ///
 /// `routes` may be a plain `Object` (`{ "/a": fn }`) or an `Array` of
 /// `[pattern, fn]` pairs; see `route_entries` for the tradeoff between the
@@ -159,28 +162,40 @@ fn route_entries(routes: &JsValue) -> Vec<(String, JsValue)> {
 pub fn js_router(props: JsValue) -> JsValue {
 	let routes_obj = Reflect::get(&props, &"routes".into()).unwrap_or(JsValue::NULL);
 
-	let (initial_path, initial_search) = current_location();
+	let (initial_path, initial_search, initial_state) = current_location();
 	let (pathname, set_path) = use_state::<String>(initial_path);
 	let (search, set_search) = use_state::<String>(initial_search);
+	let (nav_state, set_nav_state) = use_state::<JsValue>(initial_state);
 
 	{
 		let set_path = set_path.clone();
 		let set_search = set_search.clone();
-		use_effect_nodrop(
+		let set_nav_state = set_nav_state.clone();
+		use_effect(
 			move || {
 				let set_path = set_path.clone();
 				let set_search = set_search.clone();
+				let set_nav_state = set_nav_state.clone();
 				let closure = Closure::wrap(Box::new(move |_e: web_sys::Event| {
-					let (p, s) = current_location();
+					let (p, s, st) = current_location();
 					set_path(p);
 					set_search(s);
+					set_nav_state(st);
 				}) as Box<dyn Fn(web_sys::Event)>);
 				let Some(window) = web_sys::window() else {
 					crate::console_warn!("[micro-react] Router: no window available, skipping popstate listener");
-					return;
+					return Box::new(|| {}) as Box<dyn FnOnce()>;
 				};
 				let _ = window.add_event_listener_with_callback("popstate", closure.as_ref().unchecked_ref());
-				closure.forget();
+				// Unlike the old `.forget()`, this keeps `closure` alive only for
+				// as long as the listener is actually registered: on unmount (or
+				// a dep change, though deps are `[]` here so that's mount/unmount
+				// only) the cleanup removes the listener and then drops the
+				// closure, instead of leaking one closure per mount forever.
+				Box::new(move || {
+					let _ = window.remove_event_listener_with_callback("popstate", closure.as_ref().unchecked_ref());
+					drop(closure);
+				}) as Box<dyn FnOnce()>
 			},
 			Some(vec![]),
 		);
@@ -203,7 +218,7 @@ pub fn js_router(props: JsValue) -> JsValue {
 		}
 	}
 
-	// Publish { pathname, search, params } to the location context.
+	// Publish { pathname, search, params, state } to the location context.
 	let loc_obj = Object::new();
 	let _ = Reflect::set(&loc_obj, &"pathname".into(), &JsValue::from_str(&pathname));
 	let _ = Reflect::set(&loc_obj, &"search".into(), &JsValue::from_str(&search));
@@ -212,6 +227,7 @@ pub fn js_router(props: JsValue) -> JsValue {
 		let _ = Reflect::set(&params_obj, &JsValue::from_str(k), &JsValue::from_str(v));
 	}
 	let _ = Reflect::set(&loc_obj, &"params".into(), &params_obj);
+	let _ = Reflect::set(&loc_obj, &"state".into(), &nav_state);
 	ROUTER_CTX.with(|ctx| ctx.set_value(loc_obj.into()));
 
 	match matched_fn {
@@ -223,10 +239,12 @@ pub fn js_router(props: JsValue) -> JsValue {
 	}
 }
 
-/// `Link({ to, class/className, target, rel, children })` — an anchor that
-/// performs client-side navigation via `history.pushState` + a synthetic
-/// `popstate` event. A `target` other than `"_self"` (e.g. `"_blank"`) opts
-/// out of client-side navigation, matching real `<a>`/React Router behavior.
+/// `Link({ to, class/className, target, rel, state, children })` — an anchor
+/// that performs client-side navigation via `history.pushState` + a
+/// synthetic `popstate` event. A `target` other than `"_self"` (e.g.
+/// `"_blank"`) opts out of client-side navigation, matching real
+/// `<a>`/React Router behavior. `state` is passed through to
+/// `history.pushState` and surfaces as `useLocation().state`.
 #[wasm_bindgen(js_name = Link)]
 pub fn js_link(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
@@ -239,13 +257,19 @@ pub fn js_link(props: JsValue) -> JsValue {
 		.or_else(|| Reflect::get(&props, &"className".into()).ok().and_then(|v| v.as_string()));
 	let target = Reflect::get(&props, &"target".into()).ok().and_then(|v| v.as_string());
 	let rel = Reflect::get(&props, &"rel".into()).ok().and_then(|v| v.as_string());
+	let state = Reflect::get(&props, &"state".into()).unwrap_or(JsValue::NULL);
 	let children = Reflect::get(&props, &"children".into()).unwrap_or(JsValue::NULL);
 
-	// Memoized by `to`/`target` so the same `Closure`/`Function` is handed
-	// back across re-renders instead of a fresh one leaking every render
-	// (the same pattern `useNavigate` uses below).
+	// Memoized by `to`/`target`/`state` so the same `Closure`/`Function` is
+	// handed back across re-renders instead of a fresh one leaking every
+	// render (the same pattern `useNavigate` uses below). `state` is reduced
+	// to a JSON string for the dependency comparison since `DepVal` compares
+	// by `String`; non-JSON-serializable state (e.g. functions) will compare
+	// as unchanged, same caveat as any `useMemo`/`useEffect` dep in JS.
 	let to_for_click = to.clone();
 	let target_for_click = target.clone();
+	let state_for_click = state.clone();
+	let state_dep = js_sys::JSON::stringify(&state).ok().and_then(|s| s.as_string()).unwrap_or_default();
 	let onclick_fn: Function = use_memo(
 		move || {
 			let closure = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
@@ -267,12 +291,12 @@ pub fn js_link(props: JsValue) -> JsValue {
 					crate::console_warn!("[micro-react] Link: no history available, navigation ignored");
 					return;
 				};
-				let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&to_for_click));
+				let _ = history.push_state_with_url(&state_for_click, "", Some(&to_for_click));
 				window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
 			}) as Box<dyn Fn(web_sys::MouseEvent)>);
 			closure.into_js_value().unchecked_into::<Function>()
 		},
-		Some(vec![DepVal(to.clone()), DepVal(target.clone().unwrap_or_default())]),
+		Some(vec![DepVal(to.clone()), DepVal(target.clone().unwrap_or_default()), DepVal(state_dep)]),
 	);
 
 	let mut builder = VNode::tag("a").attr("href", to.as_str()).on("onClick", onclick_fn);
@@ -295,12 +319,13 @@ pub fn js_link(props: JsValue) -> JsValue {
 	vnode_to_js(builder.build()).unwrap_or(JsValue::NULL)
 }
 
-/// `NavLink({ to, end, class/className, children })` — a `Link` that knows
-/// whether it's "active" (current location is `to`, or a descendant path of
-/// it unless `end` is set) and reflects that in its class list.
-/// `class`/`className` may be a plain string (appended with a trailing
+/// `NavLink({ to, end, class/className, target, rel, state, children })` — a
+/// `Link` that knows whether it's "active" (current location is `to`, or a
+/// descendant path of it unless `end` is set) and reflects that in its class
+/// list. `class`/`className` may be a plain string (appended with a trailing
 /// `" active"` when active) or a function `({ isActive }) => string`,
-/// mirroring React Router's `NavLink`.
+/// mirroring React Router's `NavLink`. `target`/`rel`/`state` are forwarded
+/// to the underlying `Link` unchanged.
 #[wasm_bindgen(js_name = NavLink)]
 pub fn js_nav_link(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
@@ -347,16 +372,22 @@ pub fn js_nav_link(props: JsValue) -> JsValue {
 
 	// Delegate the actual anchor/click-navigation building to Link, then
 	// swap in the computed class so the two stay in sync with each other.
+	// `target`/`rel`/`state` aren't NavLink-specific, so just forward
+	// whatever the caller passed through unchanged.
 	let link_props = Object::new();
 	let _ = Reflect::set(&link_props, &"to".into(), &JsValue::from_str(&to));
 	let _ = Reflect::set(&link_props, &"className".into(), &JsValue::from_str(&class_name));
-	if let Ok(children) = Reflect::get(&props, &"children".into()) {
-		let _ = Reflect::set(&link_props, &"children".into(), &children);
+	for key in ["target", "rel", "state", "children"] {
+		if let Ok(v) = Reflect::get(&props, &key.into())
+			&& !v.is_undefined()
+		{
+			let _ = Reflect::set(&link_props, &key.into(), &v);
+		}
 	}
 	js_link(link_props.into())
 }
 
-/// `useLocation()` — returns the current `{ pathname, search, params }`.
+/// `useLocation()` — returns the current `{ pathname, search, params, state }`.
 #[wasm_bindgen(js_name = useLocation)]
 pub fn js_use_location() -> JsValue {
 	ROUTER_CTX.with(crate::context::use_context)
@@ -459,16 +490,21 @@ fn fresh_instance(vnode: &VNode) -> VNode {
 	v
 }
 
-/// `<Navigate to="/" replace />` — declarative redirect. Performs the
-/// navigation as an effect (once per mount, or again if `to`/`replace`
-/// change) and renders nothing. `replace` swaps in the new entry via
+/// `<Navigate to="/" replace state={...} />` — declarative redirect. Performs
+/// the navigation as an effect (once per mount, or again if `to`/`replace`/
+/// `state` change) and renders nothing. `replace` swaps in the new entry via
 /// `history.replaceState` instead of `pushState`, so the redirect doesn't
 /// leave the page it redirected away from in the back-button history —
-/// important for guarded/redirect routes.
+/// important for guarded/redirect routes. `state` is passed through to
+/// `history.pushState`/`replaceState` and surfaces as `useLocation().state`.
 #[wasm_bindgen(js_name = Navigate)]
 pub fn js_navigate(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
 	let replace = Reflect::get(&props, &"replace".into()).ok().map(|v| v.is_truthy()).unwrap_or(false);
+	let state = Reflect::get(&props, &"state".into()).unwrap_or(JsValue::NULL);
+	// Reduced to a JSON string purely for the effect's dependency
+	// comparison, same caveat as `Link`'s memo dep above.
+	let state_dep = js_sys::JSON::stringify(&state).ok().and_then(|s| s.as_string()).unwrap_or_default();
 
 	use_effect_nodrop(
 		{
@@ -482,16 +518,13 @@ pub fn js_navigate(props: JsValue) -> JsValue {
 					crate::console_warn!("[micro-react] Navigate: no history available, navigation ignored");
 					return;
 				};
-				let result = if replace {
-					history.replace_state_with_url(&JsValue::NULL, "", Some(&to))
-				} else {
-					history.push_state_with_url(&JsValue::NULL, "", Some(&to))
-				};
+				let result =
+					if replace { history.replace_state_with_url(&state, "", Some(&to)) } else { history.push_state_with_url(&state, "", Some(&to)) };
 				let _ = result;
 				window.dispatch_event(&web_sys::Event::new("popstate").expect("valid event name")).ok();
 			}
 		},
-		Some(vec![DepVal(to), DepVal(replace.to_string())]),
+		Some(vec![DepVal(to), DepVal(replace.to_string()), DepVal(state_dep)]),
 	);
 
 	vnode_to_js(VNode::null()).unwrap_or(JsValue::NULL)
