@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Coverage for the remaining "Test coverage gaps" items from the TODO
 //! around `useImperativeHandle` and `Suspense`:
 //!

@@ -31,6 +31,12 @@
 
 	clippy::similar_names, // similar ...
 	clippy::too_many_lines, // will correct it when i correct file lengths
+	clippy::missing_errors_doc, // JS/WASM exported contract methods intentionally dynamic
+	clippy::missing_panics_doc, // JS/WASM interop methods may panic during conversion
+	clippy::expect_used, // JS interop validation uses checked casts and guarded assumptions
+	clippy::unwrap_used, // some JS/WASM wrappers rely on proven runtime invariants
+	clippy::panic, // runtime JS assertions are intentionally kept narrow and checked
+	clippy::future_not_send, // wasm_bindgen futures are not Send in browser runtimes
 
 	clippy::new_without_default, // pre-existing crate convention
 )]

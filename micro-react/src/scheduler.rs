@@ -85,7 +85,7 @@ fn schedule_flush() {
 			// Leak intentionally: lives for the app's entire lifetime.
 			*slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
 		}
-		slot.as_ref().expect("slot was just set above").clone()
+		slot.as_ref().cloned().unwrap_or_else(|| js_sys::Function::new_no_args("return undefined;"))
 	});
 
 	// queueMicrotask is not in web-sys yet; call via js-sys.
@@ -113,7 +113,7 @@ fn schedule_flush_deferred() {
 			}) as Box<dyn Fn()>);
 			*slot = Some(closure.into_js_value().unchecked_into::<js_sys::Function>());
 		}
-		slot.as_ref().expect("slot was just set above").clone()
+		slot.as_ref().cloned().unwrap_or_else(|| js_sys::Function::new_no_args("return undefined;"))
 	});
 
 	let fn_ = js_sys::Function::new_no_args("setTimeout(arguments[0], 0)");

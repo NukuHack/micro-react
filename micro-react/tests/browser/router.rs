@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Tests for `router::Pattern` (compile + matches).
 //!
 //! `Pattern::matches` builds and executes a `js_sys::RegExp`, which calls
@@ -311,6 +313,12 @@ fn build_link_props_with_target(to: &str, target: &str) -> JsValue {
 	props
 }
 
+fn cancelable_click_event() -> web_sys::MouseEvent {
+	let init = web_sys::MouseEventInit::new();
+	init.set_cancelable(true);
+	web_sys::MouseEvent::new_with_mouse_event_init_dict("click", &init).expect("valid cancelable click event")
+}
+
 // A `target` other than `"_self"` (e.g. `target="_blank"`) opens the link in
 // another browsing context, so `Link` must not hijack the click with
 // client-side navigation there — it should behave like a plain `<a>` and
@@ -329,7 +337,7 @@ fn link_with_non_self_target_does_not_hijack_navigation() {
 	assert_eq!(anchor.get_attribute("target").as_deref(), Some("_blank"), "expected the anchor's target attribute to be set");
 	assert_eq!(anchor.get_attribute("rel").as_deref(), Some("noopener"), "expected the anchor's rel attribute to be set");
 
-	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
+	let ev = cancelable_click_event();
 	anchor.dispatch_event(&ev).expect("dispatch should succeed");
 
 	assert!(!ev.default_prevented(), "Link should not call preventDefault for a target other than \"_self\", so the browser can open it normally");
@@ -348,7 +356,7 @@ fn link_with_self_target_still_navigates_client_side() {
 
 	let anchor = container.query_selector("a").expect("query should not error").expect("expected an <a> element");
 
-	let ev = web_sys::MouseEvent::new("click").expect("valid event name");
+	let ev = cancelable_click_event();
 	anchor.dispatch_event(&ev).expect("dispatch should succeed");
 
 	assert!(ev.default_prevented(), "Link should still call preventDefault and navigate client-side when target is \"_self\"");

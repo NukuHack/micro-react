@@ -30,7 +30,7 @@ features = [
   "InputEvent",
   "KeyboardEvent",
   "Location",
-  "MouseEvent", "MutationObserver", "MutationObserverInit", "MutationRecord",
+  "MouseEvent", "MouseEventInit", "MutationObserver", "MutationObserverInit", "MutationRecord",
   "NamedNodeMap", "Node", "NodeList",
   "Performance", "PointerEvent",
   "Response",

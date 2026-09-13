@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Reconciler edge-case tests for the tricky paths called out in review:
 //! keyed list reordering, ErrorBoundary behavior (a child throwing, a
 //! child failing on first mount, a child failing on its own later

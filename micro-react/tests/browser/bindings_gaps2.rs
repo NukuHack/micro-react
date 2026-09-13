@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Third pass at the remaining `src/bindings.rs` TODO gaps not covered by
 //! `bindings.rs`/`bindings_gaps.rs`:
 //!

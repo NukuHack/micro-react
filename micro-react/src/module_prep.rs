@@ -186,50 +186,55 @@ pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 #[must_use]
 pub fn rewrite_default_export(source: &str) -> (String, Option<String>) {
 	let chars: Vec<char> = source.chars().collect();
-	let n = chars.len();
-	let mut i = 0;
+	let total_chars = chars.len();
+	let mut cursor = 0;
 
-	while i < n {
-		if chars[i..].starts_with(&['e', 'x', 'p', 'o', 'r', 't']) && !chars.get(i + 6).is_some_and(|&c| is_ident_char(c)) {
-			let mut j = i + 6;
-			let before_ws = j;
-			while j < n && chars[j].is_whitespace() {
-				j += 1;
+	while cursor < total_chars {
+		if chars[cursor..].starts_with(&['e', 'x', 'p', 'o', 'r', 't']) && !chars.get(cursor + 6).is_some_and(|&ch| is_ident_char(ch)) {
+			let mut next = cursor + 6;
+			let before_ws = next;
+			while next < total_chars && chars[next].is_whitespace() {
+				next += 1;
 			}
-			if j > before_ws && chars[j..].starts_with(&['d', 'e', 'f', 'a', 'u', 'l', 't']) && !chars.get(j + 7).is_some_and(|&c| is_ident_char(c)) {
-				let mut k = j + 7;
-				let before_ws = k;
-				while k < n && chars[k].is_whitespace() {
-					k += 1;
+			if next > before_ws
+				&& chars[next..].starts_with(&['d', 'e', 'f', 'a', 'u', 'l', 't'])
+				&& !chars.get(next + 7).is_some_and(|&ch| is_ident_char(ch))
+			{
+				let mut after_default = next + 7;
+				let before_ws = after_default;
+				while after_default < total_chars && chars[after_default].is_whitespace() {
+					after_default += 1;
 				}
-				if k > before_ws {
-					if chars[k..].starts_with(&['f', 'u', 'n', 'c', 't', 'i', 'o', 'n']) && !chars.get(k + 8).is_some_and(|&c| is_ident_char(c)) {
-						let mut m = k + 8;
-						while m < n && chars[m].is_whitespace() {
-							m += 1;
+				if after_default > before_ws {
+					if chars[after_default..].starts_with(&['f', 'u', 'n', 'c', 't', 'i', 'o', 'n'])
+						&& !chars.get(after_default + 8).is_some_and(|&ch| is_ident_char(ch))
+					{
+						let mut name_cursor = after_default + 8;
+						while name_cursor < total_chars && chars[name_cursor].is_whitespace() {
+							name_cursor += 1;
 						}
-						let name_start = m;
-						while m < n && is_ident_char(chars[m]) {
-							m += 1;
+						let name_start = name_cursor;
+						while name_cursor < total_chars && is_ident_char(chars[name_cursor]) {
+							name_cursor += 1;
 						}
-						if m > name_start {
-							let name: String = chars[name_start..m].iter().collect();
+						if name_cursor > name_start {
+							let name: String = chars[name_start..name_cursor].iter().collect();
 							let mut out = String::with_capacity(source.len());
-							out.extend(&chars[..i]);
+							out.extend(&chars[..cursor]);
 							out.push_str("function ");
 							out.extend(&chars[name_start..]);
 							return (out, Some(name));
 						}
 					}
 					let mut out = String::with_capacity(source.len());
-					out.extend(&chars[..i]);
+					out.extend(&chars[..cursor]);
 					out.push_str("exports.default = ");
-					out.extend(&chars[k..]);
+					out.extend(&chars[after_default..]);
 					return (out, None);
 				}
 			}
 		}
-		i += 1;
+		cursor += 1;
 	}
 
 	(source.to_string(), None)
@@ -379,6 +384,7 @@ pub fn prepare_module(source: &str) -> Result<JsValue, JsValue> {
 
 #[cfg(test)]
 mod tests {
+	#![allow(clippy::expect_used, clippy::unwrap_used)]
 	use super::*;
 
 	#[test]

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Tests for `vnode` — mostly pure Rust logic (VNode/PropVal/Template/
 //! ElementBuilder/ComponentFn/Children/NodeRef construction), run here via
 //! `wasm-bindgen-test` (like the rest of `tests/`) so `build.sh`'s single

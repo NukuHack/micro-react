@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use micro_react::jsx::{JsxError, transpile_jsx_str};
 
 // ─── Tests ───

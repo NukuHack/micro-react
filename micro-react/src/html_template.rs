@@ -260,77 +260,75 @@ const CASED_ATTR_NAMES: &[(&str, &str)] = &[
 fn build_case_map(html: &str) -> HashMap<String, String> {
 	let mut map = HashMap::new();
 	let chars: Vec<char> = html.chars().collect();
-	let n = chars.len();
-	let mut i = 0;
+	let total_chars = chars.len();
+	let mut cursor = 0;
 	let mut in_tag = false;
 	// Quote char we're currently inside an attribute value for, if any —
 	// needed so a `>` or `=` inside a quoted value (`title="a > b"`,
 	// `class="x=y"`) can't be mistaken for tag-end or a name/value split.
 	let mut in_quote: Option<char> = None;
 
-	while i < n {
-		let c = chars[i];
+	while cursor < total_chars {
+		let ch = chars[cursor];
 
-		if let Some(q) = in_quote {
-			if c == q {
+		if let Some(quote) = in_quote {
+			if ch == quote {
 				in_quote = None;
 			}
-			i += 1;
+			cursor += 1;
 			continue;
 		}
 
 		if !in_tag {
-			if c == '<' {
+			if ch == '<' {
 				// Skip comments/doctype-ish `<!...>` — they have no attrs.
-				if i + 1 < n && chars[i + 1] == '!' {
-					while i < n && chars[i] != '>' {
-						i += 1;
+				if cursor + 1 < total_chars && chars[cursor + 1] == '!' {
+					while cursor < total_chars && chars[cursor] != '>' {
+						cursor += 1;
 					}
-					i += 1;
+					cursor += 1;
 					continue;
 				}
 				in_tag = true;
 			}
-			i += 1;
+			cursor += 1;
 			continue;
 		}
 
-		if c == '"' || c == '\'' {
-			in_quote = Some(c);
-			i += 1;
+		if ch == '"' || ch == '\'' {
+			in_quote = Some(ch);
+			cursor += 1;
 			continue;
 		}
 
-		if c == '>' {
+		if ch == '>' {
 			in_tag = false;
-			i += 1;
+			cursor += 1;
 			continue;
 		}
 
-		if c.is_ascii_alphabetic() {
-			let start = i;
-			let mut j = i;
-			while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':')) {
-				j += 1;
+		if ch.is_ascii_alphabetic() {
+			let name_start = cursor;
+			let mut name_end = cursor;
+			while name_end < total_chars && (chars[name_end].is_ascii_alphanumeric() || matches!(chars[name_end], '-' | '_' | ':')) {
+				name_end += 1;
 			}
-			let mut k = j;
-			while k < n && chars[k].is_whitespace() {
-				k += 1;
+			let mut value_start = name_end;
+			while value_start < total_chars && chars[value_start].is_whitespace() {
+				value_start += 1;
 			}
-			if k < n && chars[k] == '=' {
-				let name: String = chars[start..j].iter().collect();
+			if value_start < total_chars && chars[value_start] == '=' {
+				let name: String = chars[name_start..name_end].iter().collect();
 				let lower = name.to_ascii_lowercase();
 				if name != lower {
 					map.insert(lower, name);
 				}
 			}
-			i = j;
+			cursor = name_end;
 			continue;
 		}
-
-		i += 1;
+		cursor += 1;
 	}
-
 	map
 }
 
@@ -1043,6 +1041,7 @@ fn render_element(tpl: &ElementTemplate, values: &Array) -> Option<VNode> {
 // no DOM/JS needed, so plain `cargo test --lib` covers these.
 #[cfg(test)]
 mod pure_logic_tests {
+	#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::manual_string_new)]
 	use super::*;
 
 	// ── expand_self_closing_tags ──

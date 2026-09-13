@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Follow-up coverage for the `bindings.rs` gaps the TODO flagged as still
 //! genuinely untested after `tests/browser/bindings.rs`'s first pass:
 //! `create_element`'s Fragment-symbol detection and the

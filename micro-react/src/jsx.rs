@@ -63,7 +63,7 @@ fn looks_like_jsx_start(chars: &[char], i: usize) -> bool {
 /// Synthetic attribute name prefix used to smuggle a JSX spread
 /// (`{...expr}`) through the `html` sentinel-HTML pipeline. Attribute
 /// *names* in that pipeline must be static text (see the comment on
-/// `build_case_map` in `html_template.rs``) so a bare `...expr` can't be
+/// `build_case_map` in `html_template.rs`) so a bare `...expr` can't be
 /// represented directly; instead it's rewritten as a normal
 /// `name="${expr}"` attribute using this reserved name prefix, and
 /// `html_template::compile_node` recognizes the prefix and treats the
@@ -316,7 +316,7 @@ thread_local! {
 		js_sys::Reflect::apply(&getter, &JsValue::UNDEFINED, &js_sys::Array::new())
 			.ok()
 			.and_then(|v| v.dyn_into::<js_sys::Function>().ok())
-			.expect("AsyncFunction constructor should always be obtainable")
+			.unwrap_or_else(|| js_sys::Function::new_no_args("return Function;"))
 	};
 }
 struct JsxModuleRecord {
@@ -574,7 +574,10 @@ async fn load_module_body(
 
 		if is_circular {
 			// Break the deadlock! Grab the pre-allocated reference without awaiting
-			let child_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).unwrap().exports.clone());
+			let child_exports = MODULE_CACHE.with(|cache| cache.borrow().get(&child_url).map(|record| record.exports.clone()));
+			let Some(child_exports) = child_exports else {
+				continue;
+			};
 			let result_obj = js_sys::Object::new();
 			js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
 			js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;

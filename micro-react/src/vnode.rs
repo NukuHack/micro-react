@@ -319,6 +319,11 @@ impl ComponentFn {
 	pub fn infallible(f: impl Fn(Props) -> VNode + 'static) -> Self {
 		Self(std::rc::Rc::new(move |props| Ok(f(props))))
 	}
+	/// Calls the wrapped component function.
+	///
+	/// # Errors
+	/// Returns the underlying JavaScript value if the component throws or
+	/// returns an error while rendering.
 	pub fn call(&self, props: Props) -> Result<VNode, JsValue> {
 		(self.0)(props)
 	}

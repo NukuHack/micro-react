@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity, clippy::needless_range_loop, clippy::eq_op)]
+
 //! Integration tests for the hooks in `src/hooks.rs` (and the scheduler
 //! that drives them) driven through `Root::render`, the same way real
 //! components exercise them — hooks only work inside `with_inst`, which

@@ -15,9 +15,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen_test::*;
 
-use micro_react::hooks::use_effect;
+use micro_react::hooks::{use_effect, use_state};
 use micro_react::render::Root;
+use micro_react::scheduler::flush_rerenders;
 use micro_react::vnode::{ComponentFn, Props, VNode};
+
+type RouteSetter = Rc<dyn Fn(i32)>;
+type RouteSetterSlot = Rc<RefCell<Option<RouteSetter>>>;
 
 fn make_container() -> web_sys::Element {
 	let doc = web_sys::window().unwrap().document().unwrap();
@@ -46,6 +50,54 @@ fn render_twice_on_same_root_updates_dom_in_place() {
 		"an update pass (same tag/key) should reuse the existing DOM node rather than recreating it"
 	);
 	assert_eq!(container.children().length(), 1, "expected exactly one child after two renders of an equivalent tree");
+}
+
+#[wasm_bindgen_test]
+fn mounted_app_can_navigate_between_routes_and_render_loops() {
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let route_slot: RouteSetterSlot = Rc::new(RefCell::new(None));
+	let route_slot_for_comp = route_slot.clone();
+
+	let app = ComponentFn::infallible(move |_props: Props| {
+		let (route, set_route) = use_state(0i32);
+		*route_slot_for_comp.borrow_mut() = Some(set_route);
+		let items = ["Alpha", "Beta", "Gamma"];
+		let content = match route {
+			0 => VNode::tag("ul").children(items.iter().map(|item| VNode::tag("li").text(*item).build())).build(),
+			1 => VNode::tag("section").text("About").build(),
+			_ => VNode::tag("section").text("Settings").build(),
+		};
+		VNode::tag("main")
+			.child(
+				VNode::tag("nav")
+					.child(VNode::tag("button").attr("type", "button").text("Home").build())
+					.child(VNode::tag("button").attr("type", "button").text("About").build())
+					.child(VNode::tag("button").attr("type", "button").text("Settings").build())
+					.build(),
+			)
+			.child(content)
+			.build()
+	});
+
+	root.render(VNode::component("App", app, vec![])).unwrap();
+	assert_eq!(container.query_selector_all("li").unwrap().length(), 3, "initial route should mount a looped list of items");
+	assert!(container.text_content().unwrap().contains("Alpha"));
+	assert!(container.text_content().unwrap().contains("Gamma"));
+
+	let setter = route_slot.borrow().clone().unwrap();
+	setter(1);
+	flush_rerenders();
+	assert!(container.text_content().unwrap().contains("About"), "changing route should switch the page body");
+	assert_eq!(container.query_selector_all("li").unwrap().length(), 0, "the home list should disappear on a non-list route");
+
+	setter(2);
+	flush_rerenders();
+	assert!(container.text_content().unwrap().contains("Settings"), "the final route should still render without stale page content");
+
+	setter(0);
+	flush_rerenders();
+	assert_eq!(container.query_selector_all("li").unwrap().length(), 3, "returning to the list route should restore the looped content");
 }
 
 #[wasm_bindgen_test]
