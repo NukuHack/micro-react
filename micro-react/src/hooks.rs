@@ -610,6 +610,58 @@ pub fn use_id() -> String {
 	}
 }
 
+// ─── useSyncExternalStore ───
+
+/// Subscribes to an external store and returns its current snapshot,
+/// re-rendering this component whenever the store notifies of a change.
+/// Generalizes the subscribe/notify pattern `use_context` already uses for
+/// Context specifically to any external store.
+///
+/// `subscribe` is called once (on mount) with a waker `Rc<dyn Fn()>`; it
+/// must return a de-registration closure that undoes the subscription (this
+/// is stored as the effect's cleanup, so it runs on unmount rather than
+/// leaking, mirroring `use_context`). `get_snapshot` reads the store's
+/// current value; it seeds the initial value and is re-invoked whenever the
+/// waker fires.
+pub fn use_sync_external_store<T>(subscribe: impl Fn(Rc<dyn Fn()>) -> Box<dyn FnOnce()> + 'static, get_snapshot: impl Fn() -> T + 'static) -> T
+where
+	T: Clone + PartialEq + 'static,
+{
+	let get_snapshot: Rc<dyn Fn() -> T> = Rc::new(get_snapshot);
+
+	let (value, _cell, set_value) = use_state_cell((get_snapshot)());
+
+	// The snapshot may have drifted since this render was scheduled (e.g.
+	// the store mutated synchronously somewhere outside our subscription's
+	// waker) — re-check so we never commit a stale value for this render.
+	let current = (get_snapshot)();
+	let result = if current == value {
+		value
+	} else {
+		set_value(current.clone());
+		current
+	};
+
+	// Subscribe once on mount (fixed deps so this never re-runs/re-leaks on
+	// later renders); the waker re-reads the snapshot and pushes it through
+	// the same state cell used above, which schedules a re-render.
+	let get_snapshot_for_effect = get_snapshot.clone();
+	let set_value_for_effect = set_value.clone();
+	use_effect(
+		move || {
+			let get_snapshot_for_waker = get_snapshot_for_effect.clone();
+			let set_value_for_waker = set_value_for_effect.clone();
+			let waker: Rc<dyn Fn()> = Rc::new(move || {
+				set_value_for_waker((get_snapshot_for_waker)());
+			});
+			subscribe(waker)
+		},
+		Some(vec![]),
+	);
+
+	result
+}
+
 // ─── Unmount — run all effect cleanups ───
 pub fn unmount_inst(inst: &mut ComponentInst) {
 	inst.unmounted = true;

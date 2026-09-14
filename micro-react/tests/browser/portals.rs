@@ -182,12 +182,21 @@ fn unmounting_a_tree_with_a_portal_subtree_cleans_up_its_effects_and_content() {
 
 	root.unmount();
 
-	// The key regression this guards against: `unmount_vnode`'s Element arm
-	// unconditionally passes `skip_remove: true` down to its children on the
-	// (usually valid) assumption that "removing the parent removes all DOM
-	// children" — an assumption a Portal's children break, since their DOM
-	// actually lives in a different, unrelated container. Effect
+	// The key regression this guards against: `unmount_vnode`'s Fragment/
+	// Portal arm used to forward the same `skip_remove` it was handed down
+	// to a Portal's children unchanged. When the outer tree unmounts via its
+	// root `Element`, that flag is `true` — correct for the root's *own*
+	// ordinary children, whose DOM really is removed along with it, but
+	// wrong for a Portal's children, whose DOM lives in a separate,
+	// unrelated container that removing the root does nothing to. Effect
 	// cleanup must still run for a component nested inside a portal even
-	// though its DOM isn't reachable through the removed root container.
+	// though its DOM isn't reachable through the removed root container...
 	assert!(*cleaned_up.borrow(), "unmounting the outer tree should run effect cleanups for components nested inside a portal");
+	// ...and the portal's own DOM content must actually be removed from its
+	// foreign target container, not just orphaned there.
+	assert_eq!(
+		portal_target.text_content().as_deref(),
+		Some(""),
+		"unmounting the outer tree should remove the portal's content from its foreign target container"
+	);
 }

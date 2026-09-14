@@ -4,7 +4,6 @@ read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
 
-- **A portal's foreign container isn't cleaned up when an ancestor holding the portal unmounts.** `unmount_vnode`'s `Element` arm (`src/diff.rs`) unconditionally passes `skip_remove: true` down to its children on the assumption that removing the parent element removes all its DOM descendants — true for ordinary children, but not for a `Portal`'s children, whose DOM actually lives in a separate container elsewhere in the page. Confirmed still present: the `Fragment | Portal` arm just forwards the same `skip_remove` it was given, with no special case for `Portal`. Effect/hook cleanup does still run correctly (see `unmounting_a_tree_with_a_portal_subtree_cleans_up_its_effects_and_content` in `tests/browser/portals.rs`, which deliberately only asserts the cleanup half and not DOM removal), but the portal's own DOM content is left behind in its target container. Not fixed here since the right fix (making `skip_remove` compute per-subtree, or having `Portal`'s unmount branch always force real removal for its children regardless of the flag passed down) touches shared unmount logic and deserves its own scrutiny/tests rather than a quick patch.
 - **`NodeRef` goes stale after an unkeyed tag change.** `find_match` (`src/diff.rs`) matches unkeyed children by `(key, type_tag)`, and an `Element`'s `type_tag()` is its tag name, so e.g. a `div` → `span` swap doesn't diff as an in-place update — it's a remove-then-insert, run as two independent steps in `diff_children`: the new `<span>` mounts first (`ref_.set(Some(new_span))`), then the old, now-unmatched `<div>` is unmounted afterward, which unconditionally calls `ref_.set(None)`. Since the ref is the same `Rc`-shared `NodeRef` on both vnodes, the unmount step clobbers the mount step — a `<span>` is genuinely in the DOM, but the ref reads `None`. Documented (not fixed) by `node_ref_goes_stale_after_an_unkeyed_tag_change_bug` in `tests/browser/refs_dom.rs`, which intentionally asserts the current buggy behavior so a future fix (e.g. re-attaching refs after the unmount pass, or running unmounts before mounts) shows up as a test change. Left alone here: the fix touches diff/unmount ordering, not a quick patch.
 
 ## Test coverage gaps
@@ -16,7 +15,6 @@ none as far as i know
 Things real React (or React Router) has that this project currently doesn't — one-liners, not scoped out further:
 
 - No `useTransition`/`useDeferredValue` — everything renders through the same synchronous-priority flush path in `scheduler.rs`.
-- No `useSyncExternalStore` — `use_context`'s subscribe/notify pattern in `context.rs` is basically a bespoke version of this for one specific case (context), but there's no general-purpose external-store hook.
 - No `StrictMode`-style double-invoke-to-catch-impure-renders dev aid.
 
 ## Design/soundness notes

@@ -829,10 +829,27 @@ pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
 				unmount_vnode(child, true);
 			}
 		}
-		VNodeInner::Fragment { children, .. } | VNodeInner::Portal { children, .. } => {
+		VNodeInner::Fragment { children, .. } => {
 			for child in &children.0 {
-				// Fragments/Portals have no host DOM node, must remove individually.
-				unmount_vnode(child, skip_remove || matches!(&vnode.inner, VNodeInner::Element { .. }));
+				// Fragments have no host DOM node of their own: their
+				// children's DOM lives in whatever container the fragment's
+				// parent used, so whether *they* need individual removal
+				// just follows whatever the caller already determined.
+				unmount_vnode(child, skip_remove);
+			}
+		}
+		VNodeInner::Portal { children, .. } => {
+			for child in &children.0 {
+				// A Portal's children are mounted into a *foreign* target
+				// container, not into the DOM subtree rooted at whatever
+				// ancestor is currently unmounting. A `skip_remove: true`
+				// from an ancestor `Element` only means "that ancestor's own
+				// element removal will take its normal children with it" —
+				// it says nothing about the portal's separate container, so
+				// it must never be forwarded here. Always force real
+				// removal, or the portal's DOM is orphaned in its target
+				// container when an ancestor unmounts.
+				unmount_vnode(child, false);
 			}
 		}
 		VNodeInner::Component { inst, .. } => {
