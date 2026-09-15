@@ -4,7 +4,7 @@ read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
 
-- **`NodeRef` goes stale after an unkeyed tag change.** `find_match` (`src/diff.rs`) matches unkeyed children by `(key, type_tag)`, and an `Element`'s `type_tag()` is its tag name, so e.g. a `div` → `span` swap doesn't diff as an in-place update — it's a remove-then-insert, run as two independent steps in `diff_children`: the new `<span>` mounts first (`ref_.set(Some(new_span))`), then the old, now-unmatched `<div>` is unmounted afterward, which unconditionally calls `ref_.set(None)`. Since the ref is the same `Rc`-shared `NodeRef` on both vnodes, the unmount step clobbers the mount step — a `<span>` is genuinely in the DOM, but the ref reads `None`. Documented (not fixed) by `node_ref_goes_stale_after_an_unkeyed_tag_change_bug` in `tests/browser/refs_dom.rs`, which intentionally asserts the current buggy behavior so a future fix (e.g. re-attaching refs after the unmount pass, or running unmounts before mounts) shows up as a test change. Left alone here: the fix touches diff/unmount ordering, not a quick patch.
+none as far as i know
 
 ## Test coverage gaps
 

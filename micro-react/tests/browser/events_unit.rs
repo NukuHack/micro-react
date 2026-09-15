@@ -57,6 +57,22 @@ fn single_char_event_name() {
 }
 
 #[wasm_bindgen_test]
+fn on_change_maps_to_native_input_event() {
+	// Deliberate special case (see the comment in `parse_event_prop`):
+	// React's onChange fires on every keystroke, backed by the native
+	// "input" event, not the native "change" event (which only fires on
+	// blur/commit). This was previously untested anywhere in the suite —
+	// a regression here would silently turn every controlled text
+	// input/textarea ported from React into a blur-only input.
+	assert_eq!(parse_event_prop("onChange"), Some(("input".to_string(), false)));
+}
+
+#[wasm_bindgen_test]
+fn on_change_capture_maps_to_native_input_event_with_capture_flag() {
+	assert_eq!(parse_event_prop("onChangeCapture"), Some(("input".to_string(), true)));
+}
+
+#[wasm_bindgen_test]
 fn case_insensitive_prefix_is_not_matched_when_lowercase_on() {
 	// "on" prefix check is case-sensitive: "On" (capital O) is not "on".
 	assert_eq!(parse_event_prop("OnClick"), None);

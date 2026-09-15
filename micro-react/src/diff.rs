@@ -819,7 +819,27 @@ fn find_match(new_vn: &VNode, old_children: &[VNode], skewed_index: usize, match
 
 pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
 	if let Some(ref_) = vnode_ref(vnode) {
-		ref_.set(None);
+		// Only clear the ref if it still points at *this* vnode's own DOM
+		// node. `ref_` is an `Rc`-shared `NodeRef`, and the same instance can
+		// be attached to two different vnodes in the same commit — e.g. an
+		// unkeyed tag change (`<div ref={r}>` -> `<span ref={r}>`) diffs as
+		// "mount the new node, then unmount the old, now-unmatched one" in
+		// `diff_children`'s two separate phases. The mount phase (phase 2,
+		// via `diff_element`) already called `ref_.set(Some(new_dom))` before
+		// this unmount phase (phase 3) runs. If we clobbered unconditionally
+		// here, the ref would read `None` even though the new element is
+		// genuinely mounted. Comparing against the *live* current target
+		// tells us whether some other vnode has already claimed this ref
+		// during this same commit; if so, leave it alone.
+		let current = ref_.node.borrow().clone();
+		let still_points_here = match (&current, &vnode.dom_node) {
+			(Some(c), Some(d)) => c.is_same_node(Some(d)),
+			(None, None) => true,
+			_ => false,
+		};
+		if still_points_here {
+			ref_.set(None);
+		}
 	}
 
 	match &vnode.inner {

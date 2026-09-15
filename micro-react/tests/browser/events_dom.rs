@@ -112,6 +112,45 @@ fn capture_and_bubble_handlers_on_the_same_event_name_are_independent() {
 }
 
 #[wasm_bindgen_test]
+fn handler_attached_after_events_own_timestamp_is_suppressed_for_that_event() {
+	// This is the entire reason the module exists (see its top-of-file doc
+	// comment): "guards against a handler firing on the same event that
+	// triggered its own mount." E.g. a click bubbles up through the DOM;
+	// partway through that bubble, a component re-renders and attaches a
+	// brand-new onClick to an element the event hasn't reached yet — that
+	// new handler must NOT fire for the in-flight event, only for later
+	// ones, because the user never actually clicked *that* element.
+	//
+	// Every other test in this file calls `set_event_handler` and then
+	// creates+dispatches a brand-new event, so `event.timeStamp` is always
+	// *before* `attached_at` fails to happen — i.e. the suppression branch
+	// in the proxy (`make_proxy` in src/events.rs) is never exercised
+	// anywhere in the existing suite. This test creates the event first,
+	// waits for the clock to measurably advance, then attaches the
+	// handler — so `attached_at` is unambiguously later than the event's
+	// own `timeStamp`, which is exactly the condition the proxy checks.
+	let el = make_button();
+	let performance = web_sys::window().unwrap().performance().expect("performance API should be available");
+
+	let ev = web_sys::Event::new("click").unwrap();
+	let created_at = performance.now();
+	// Busy-wait for a real clock advance past the event's own timestamp,
+	// so the comparison below can't be flaky due to timer resolution.
+	while performance.now() <= created_at {}
+
+	let (handler, count) = counting_handler();
+	set_event_handler(&el, "click", false, Some(&handler), None);
+
+	let _ = el.dispatch_event(&ev);
+	assert_eq!(*count.borrow(), 0, "a handler attached after this event's own timestamp must be suppressed for this event");
+
+	// Suppression is per-event, not permanent: a freshly created event,
+	// dispatched after the handler was attached, must fire normally.
+	dispatch_click(&el);
+	assert_eq!(*count.borrow(), 1, "the same handler should fire normally for a later event");
+}
+
+#[wasm_bindgen_test]
 fn different_event_names_do_not_interfere() {
 	let el = make_button();
 	let (click_handler, click_count) = counting_handler();

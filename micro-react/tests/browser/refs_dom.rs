@@ -94,26 +94,20 @@ fn node_ref_survives_prop_only_rerender_without_changing_identity() {
 }
 
 #[wasm_bindgen_test]
-fn node_ref_goes_stale_after_an_unkeyed_tag_change_bug() {
-	// KNOWN BUG, documented here rather than silently asserted around:
-	// `find_match` (diff.rs) matches unkeyed children by `(key, type_tag)`,
-	// and an Element's `type_tag()` is its tag name. So a `div` -> `span`
-	// swap doesn't diff as an in-place update — it's treated as "remove
-	// the old node, insert a new one", and the two halves run as
-	// independent steps in `diff_children`:
+fn node_ref_tracks_unkeyed_tag_change() {
+	// Regression test for a fixed bug: `find_match` (diff.rs) matches
+	// unkeyed children by `(key, type_tag)`, and an Element's `type_tag()`
+	// is its tag name. So a `div` -> `span` swap doesn't diff as an
+	// in-place update — it's treated as "remove the old node, insert a new
+	// one", and the two halves run as independent steps in
+	// `diff_children`:
 	//   1. the new `<span>` mounts first (`ref_.set(Some(new_span))`)
-	//   2. the old, now-unmatched `<div>` is unmounted afterwards, which
-	//      unconditionally calls `ref_.set(None)`
+	//   2. the old, now-unmatched `<div>` is unmounted afterwards
 	// Since the ref is the same `Rc`-shared `NodeRef` on both vnodes, step
-	// 2 clobbers step 1. Net effect: a `<span>` is genuinely mounted in
-	// the DOM, but the ref reads `None` — silently stale, with no way for
-	// consumers to tell the difference between "unmounted" and "reconciler
-	// ordering clobbered a live ref".
-	//
-	// This test intentionally asserts the current (surprising) behavior so
-	// a future fix (e.g. re-attaching refs after the unmount pass, or
-	// running unmounts before mounts) shows up as a test *change* here
-	// rather than a silent behavior shift.
+	// 2 used to unconditionally clobber step 1 back to `None`, even though
+	// the `<span>` was genuinely mounted. `unmount_vnode` now only clears a
+	// ref if it still points at *that* vnode's own DOM node, so a ref
+	// reassigned to a fresher node during the same commit survives.
 	let container = make_container();
 	let mut root = Root::new(container.clone());
 	let node_ref = NodeRef::new();
@@ -123,15 +117,84 @@ fn node_ref_goes_stale_after_an_unkeyed_tag_change_bug() {
 
 	root.render(VNode::tag("span").ref_(node_ref.clone()).build()).unwrap();
 
-	// The span really is in the DOM...
+	// The span is in the DOM...
 	let el = container.first_element_child().expect("span should be mounted");
 	assert_eq!(el.tag_name(), "SPAN");
-	// ...but the ref does not point at it. This is the bug.
-	assert!(
-		node_ref.node.borrow().is_none(),
-		"documents current buggy behavior: ref goes stale (None) after an unkeyed tag change, \
-         even though a new element is mounted — see comment above for root cause"
-	);
+	// ...and the ref points at it.
+	let current = node_ref.node.borrow().clone().expect("ref should track the new element after an unkeyed tag change");
+	assert!(current.is_same_node(Some(el.as_ref())), "ref should point at the actual mounted <span>, not a stale/cleared value");
+}
+
+#[wasm_bindgen_test]
+fn node_ref_tracks_keyed_tag_change() {
+	// Same bug/fix as `node_ref_tracks_unkeyed_tag_change`, but with an
+	// explicit key. `find_match` requires *both* the key and `type_tag`
+	// (tag name, for Elements) to match, so a keyed element that changes
+	// tag while keeping its key still fails to match and goes through the
+	// exact same mount-then-unmount two-phase path — worth covering
+	// separately since it's easy to assume keys alone are enough to keep
+	// a vnode "the same" across a diff.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let node_ref = NodeRef::new();
+
+	root.render(VNode::fragment(vec![VNode::tag("div").ref_(node_ref.clone()).key("a").build()])).unwrap();
+	assert!(node_ref.node.borrow().is_some());
+
+	root.render(VNode::fragment(vec![VNode::tag("span").ref_(node_ref.clone()).key("a").build()])).unwrap();
+
+	let el = container.first_element_child().expect("span should be mounted");
+	assert_eq!(el.tag_name(), "SPAN");
+	let current = node_ref.node.borrow().clone().expect("ref should track the new element after a keyed tag change");
+	assert!(current.is_same_node(Some(el.as_ref())), "ref should point at the actual mounted <span>, not a stale/cleared value");
+}
+
+#[wasm_bindgen_test]
+fn node_ref_still_clears_on_genuine_unmount_after_unkeyed_tag_change_fix() {
+	// Companion to the test above: make sure the fix (only clearing a ref
+	// if it still points at the unmounting vnode's own DOM node) didn't
+	// accidentally disable clearing altogether. A real removal — no
+	// replacement claiming the ref afterward — must still null it out.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+	let node_ref = NodeRef::new();
+
+	root.render(VNode::fragment(vec![VNode::tag("div").ref_(node_ref.clone()).key("a").build()])).unwrap();
+	assert!(node_ref.node.borrow().is_some());
+
+	root.render(VNode::fragment(vec![])).unwrap();
+	assert!(node_ref.node.borrow().is_none(), "ref should still be cleared when its element is genuinely removed, not replaced");
+}
+
+#[wasm_bindgen_test]
+fn node_ref_with_sync_tracks_unkeyed_tag_change() {
+	// Same scenario as `node_ref_tracks_unkeyed_tag_change`, but for the
+	// callback-ref (`with_sync`) flavor, whose closure is also shared
+	// across the old/new vnodes via the same `Rc<NodeRef>`. The fix must
+	// not make the sync callback fire a spurious `None` for the clobbered
+	// case, nor skip the real `None` firing on a genuine unmount.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	let calls: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(vec![])); // true = attached, false = detached
+	let calls_for_sync = calls.clone();
+	let node_ref = NodeRef::with_sync(move |node| {
+		calls_for_sync.borrow_mut().push(node.is_some());
+	});
+
+	root.render(VNode::tag("div").ref_(node_ref.clone()).build()).unwrap();
+	root.render(VNode::tag("span").ref_(node_ref.clone()).build()).unwrap();
+
+	let current = node_ref.node.borrow().clone().expect("ref should track the new element after an unkeyed tag change");
+	let el: web_sys::Element = current.dyn_into().unwrap();
+	assert_eq!(el.tag_name(), "SPAN");
+
+	// Mount fired true, and the clobbered unmount step must NOT have fired
+	// a spurious `false` in between — only a genuine unmount fires `false`.
+	assert_eq!(*calls.borrow(), vec![true], "sync callback should only have fired once (mount), not a spurious detach during the tag swap");
+
+	root.unmount();
+	assert_eq!(calls.borrow().last(), Some(&false), "sync callback should still fire false on a genuine unmount after the swap");
 }
 
 // ─── Callback-style refs (`NodeRef::with_sync`) ───
