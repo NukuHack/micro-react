@@ -516,7 +516,7 @@ fn fresh_instance(vnode: &VNode) -> VNode {
 #[must_use]
 pub fn js_navigate(props: JsValue) -> JsValue {
 	let to = Reflect::get(&props, &"to".into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
-	let replace = Reflect::get(&props, &"replace".into()).ok().is_some_and(|v| v.is_truthy());
+	let replace = Reflect::get(&props, &"replace".into()).is_ok_and(|v| v.is_truthy());
 	let state = Reflect::get(&props, &"state".into()).unwrap_or(JsValue::NULL);
 	// Reduced to a JSON string purely for the effect's dependency
 	// comparison, same caveat as `Link`'s memo dep above.

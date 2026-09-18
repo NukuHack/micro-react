@@ -37,7 +37,7 @@ pub(crate) fn skip_html_doctype(chars: &[char], i: usize) -> Option<usize> {
 /// Scans a tag name starting at `start` (right after `<` or `</`), returning
 /// the index one past the last name character.
 #[must_use]
-pub fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
+pub const fn scan_tag_name_end(chars: &[char], start: usize) -> usize {
 	let n = chars.len();
 	let mut j = start;
 	while j < n && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '-' | '_' | ':' | '.')) {
