@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out your repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Install Rust toolchain (needed by the build script)
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 3. Cache cargo registry and build artifacts (optional but recommended)
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # 4. Download the build script from the NukuHack/script repo
+      - name: Fetch build script
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/NukuHack/script/main/shell/build.sh \
+            -o /tmp/build.sh
+          chmod +x /tmp/build.sh
+
+      # 5. Run the script inside the micro-react directory of the repo
+      - name: Run build script in micro-react
+        run: |
+          cd "$GITHUB_WORKSPACE/micro-react"
+          /tmp/build.sh -c
+
+
