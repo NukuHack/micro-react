@@ -165,6 +165,17 @@ pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 	Some(ImportSpecifier { named, default_name, namespace_name, from })
 }
 
+/// Specifiers that resolve to identifiers already available in scope (e.g.
+/// injected globals) rather than a real fetchable module. An `import ...
+/// from` line naming one of these is still stripped from the source — the
+/// statement would be a syntax error left in place, since module bodies run
+/// through `new AsyncFunction`, not an actual ES module — but it is dropped
+/// before it reaches the specifier list, so `load_module_body` never tries
+/// to fetch/resolve it and never rebinds the imported names as parameters.
+/// The imported identifiers (`StrictMode`, `createRoot`, `Route`, ...) fall
+/// through to whatever is already bound in the surrounding scope instead.
+const SKIPPED_SPECIFIERS: &[&str] = &["react", "react-dom/client", "react-router-dom"];
+
 #[must_use]
 pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let mut specifiers = Vec::new();
@@ -174,7 +185,9 @@ pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 			parse_import_line(line).map_or_else(
 				|| line.to_string(),
 				|spec| {
-					specifiers.push(spec);
+					if !SKIPPED_SPECIFIERS.contains(&spec.from.as_str()) {
+						specifiers.push(spec);
+					}
 					String::new()
 				},
 			)
@@ -412,5 +425,29 @@ mod tests {
 	#[test]
 	fn bare_import_rejects_trailing_garbage() {
 		assert!(parse_import_line("import './x.css' extra").is_none());
+	}
+
+	#[test]
+	fn skipped_specifiers_are_stripped_but_not_resolved() {
+		let source = "import { StrictMode } from 'react';\n\
+			import { createRoot } from 'react-dom/client';\n\
+			import { Route, Routes, BrowserRouter } from 'react-router-dom';\n\
+			import { useThing } from './useThing.js';\n\
+			const x = 1;";
+		let (code, specifiers) = extract_imports(source);
+
+		// None of the three skipped specifiers made it into the list that
+		// gets fetched/resolved.
+		assert!(specifiers.iter().all(|s| s.from != "react"));
+		assert!(specifiers.iter().all(|s| s.from != "react-dom/client"));
+		assert!(specifiers.iter().all(|s| s.from != "react-router-dom"));
+
+		// A normal, non-skipped import is still resolved as usual.
+		assert!(specifiers.iter().any(|s| s.from == "./useThing.js"));
+
+		// The skipped import lines are gone from the emitted code (each
+		// becomes an empty line), so the body stays valid to execute.
+		assert!(!code.contains("import"));
+		assert!(code.contains("const x = 1;"));
 	}
 }
