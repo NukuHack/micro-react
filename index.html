@@ -22,9 +22,39 @@ if (sessionStorage.redirect) {
 window.MicroReact = await import('./micro-react/pkg/micro_react.js')
   .then(async (m) => { await m.default(); return m; });
 
-// html is a wrapper: tagged templates call (strings, ...values), the
-// wasm export needs (strings, valuesArray) — no way to avoid this one.
-window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
+  // html is a wrapper: tagged templates call (strings, ...values), the
+  // wasm export needs (strings, valuesArray) — no way to avoid this one.
+  window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
+
+  // ─── lazy() — React-style lazy loading on top of the existing Suspense ───
+  // A component "suspends" by throwing a pending promise (a thenable); Suspense
+  // catches that (same path as a thrown error) and retries once it settles.
+  // This needs no WASM changes — it's the same trick memo()/forwardRef() use.
+  window.lazy = function lazy(loader) {
+    let status = 'pending';   // 'pending' | 'success' | 'error'
+    let payload;              // resolved component, or the caught error
+    let promise;               // memoized so we only call loader() once
+
+    return function Lazy(props) {
+      if (status === 'success') return createElement(payload, props);
+      if (status === 'error') throw payload;
+
+      if (!promise) {
+        promise = Promise.resolve(loader()).then(
+          (mod) => { status = 'success'; payload = (mod && mod.default) ? mod.default : mod; },
+          (err) => { status = 'error'; payload = err; },
+        );
+      }
+      throw promise; // Suspense sees this is a thenable -> renders fallback, retries on settle
+    };
+  };
+
+  // react-router-dom's BrowserRouter just supplies history context to Routes —
+  // this Router already reads window.location/history directly, so BrowserRouter
+  // only needs to exist and render its children.
+  window.BrowserRouter = function BrowserRouter(props) {
+    return props.children;
+  };
 
 // make everything Global
 Object.assign(window, MicroReact, MicroReact.createExtras());
