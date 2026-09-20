@@ -294,18 +294,13 @@ mod tests {
 	}
 
 	#[test]
-	fn multi_line_import_is_not_supported_left_untouched_as_plain_code() {
-		// Documents a known boundary: parse_import_line matches a whole
-		// *line*, so an import statement split across multiple lines is
-		// not recognized at all — none of its lines get extracted, and the
-		// import is silently left in the output as-is (not stripped, not
-		// resolved). This is the documented limitation from task.md, not
-		// a crash — pinning it down here so a future change to this
-		// behavior is a deliberate, visible diff instead of a surprise.
-		let src = "import {\n  a,\n  b\n} from 'lib';\nuse(a, b);";
+	fn multi_line_import_supported() {
+		let src = "import {\n  a,\n  b\n} from 'apple';\nuse(a, b);";
 		let (code, specifiers) = prepare_module_str(src);
-		assert_eq!(code, src, "multi-line imports are not rewritten (known unsupported boundary)");
-		assert!(specifiers.is_empty(), "multi-line imports are not extracted as specifiers (known unsupported boundary)");
+
+		assert_eq!(code.trim(), "use(a, b);".to_string(), "multi-line imports are not rewritten");
+		assert_eq!(specifiers.len(), 1, "1 extracted import from 'apple'");
+		// "multi-line imports are extracted as specifiers"
 	}
 
 	#[test]

@@ -86,6 +86,76 @@ pub fn rewrite_dynamic_imports(source: &str, base_url: &str) -> String {
 	out
 }
 
+/// Rewrites `import.meta.url` (and bare `import.meta`) into literal JS
+/// standing in for what a real ES module would see, since module bodies
+/// run through the `AsyncFunction` constructor — an ordinary function body,
+/// where `import.meta` is a `SyntaxError` even if it's never reached at
+/// runtime (it's rejected at parse time, same as a stray `export`). This is
+/// what wasm-bindgen's glue JS uses to build the default `.wasm` URL
+/// (`new URL('foo_bg.wasm', import.meta.url)`), so without this rewrite no
+/// wasm-bindgen output can load through the JSX loader at all.
+///
+/// `import.meta.url` becomes a string literal of `module_url`; any other
+/// `import.meta.<prop>` (or a bare `import.meta` not followed by `.url`)
+/// becomes `({ url: "<module_url>" })` — `import.meta`'s only property
+/// that's actually meaningful outside a bundler-provided environment.
+#[must_use]
+pub fn rewrite_import_meta(source: &str, module_url: &str) -> String {
+	let chars: Vec<char> = source.chars().collect();
+	let total = chars.len();
+	let mut out = String::with_capacity(source.len());
+	let mut cursor = 0;
+
+	let meta_literal = format!("({{ url: {module_url:?} }})");
+	let url_literal = format!("{module_url:?}");
+
+	while cursor < total {
+		let starts_here = chars[cursor..].starts_with(&['i', 'm', 'p', 'o', 'r', 't']);
+		let preceded_by_ident = cursor > 0 && is_ident_char(chars[cursor - 1]);
+		if !starts_here || preceded_by_ident {
+			out.push(chars[cursor]);
+			cursor += 1;
+			continue;
+		}
+
+		let mut after = cursor + 6;
+		while after < total && chars[after].is_whitespace() {
+			after += 1;
+		}
+		let is_meta = chars[after..].starts_with(&['.', 'm', 'e', 't', 'a']) && !chars.get(after + 5).is_some_and(|&c| is_ident_char(c));
+		if !is_meta {
+			out.push(chars[cursor]);
+			cursor += 1;
+			continue;
+		}
+		let mut after_meta = after + 5;
+
+		// `import.meta.url` → the URL literal directly; anything else
+		// (`import.meta.env`, `import.meta.hot`, or bare `import.meta`) →
+		// the fallback object, so property access still parses.
+		let mut probe = after_meta;
+		if chars.get(probe) == Some(&'.') {
+			probe += 1;
+			let name_start = probe;
+			while probe < total && is_ident_char(chars[probe]) {
+				probe += 1;
+			}
+			let name: String = chars[name_start..probe].iter().collect();
+			if name == "url" {
+				out.push_str(&url_literal);
+				after_meta = probe;
+				cursor = after_meta;
+				continue;
+			}
+		}
+
+		out.push_str(&meta_literal);
+		cursor = after_meta;
+	}
+
+	out
+}
+
 fn escape_js_string(s: &str) -> String {
 	let mut out = String::with_capacity(s.len());
 	for c in s.chars() {
@@ -256,8 +326,78 @@ pub fn parse_import_line(line: &str) -> Option<ImportSpecifier> {
 /// through to whatever is already bound in the surrounding scope instead.
 const SKIPPED_SPECIFIERS: &[&str] = &["react", "react-dom/client", "react-router-dom"];
 
+/// True if `line` looks like the *start* of an `import` declaration — same
+/// word-boundary check `parse_import_line` uses (`import` followed by
+/// whitespace), checked here before we know whether the whole statement
+/// fits on this one physical line.
+fn looks_like_import_start(line: &str) -> bool {
+	line.trim_start().strip_prefix("import").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+}
+
+/// Joins a real, multi-line `import { a, b, ... } from '...'` declaration
+/// (extremely common with more than a couple of named imports, since
+/// formatters like Prettier put each specifier on its own line) into a
+/// single logical line, so the rest of the pipeline — which parses imports
+/// one physical line at a time — can see it as one statement instead of
+/// leaving the fragments (a bare `import {`, dangling identifiers, and a
+/// stray `} from '...';`) behind as invalid syntax once the module body
+/// runs through `new AsyncFunction`.
+///
+/// Single-line imports are left completely alone (including ones that
+/// simply fail to parse for some other reason — this only ever *joins*
+/// lines, it never rewrites or drops content).
+#[must_use]
+fn collapse_multiline_imports(source: &str) -> String {
+	let lines: Vec<&str> = source.split('\n').collect();
+	let mut out: Vec<String> = Vec::with_capacity(lines.len());
+	let mut i = 0;
+	while i < lines.len() {
+		let line = lines[i];
+		if !looks_like_import_start(line) || parse_import_line(line).is_some() {
+			out.push(line.to_string());
+			i += 1;
+			continue;
+		}
+
+		// Incomplete on its own — try folding in subsequent lines (joined
+		// by a space, so multi-line block comments-free source stays valid)
+		// until the accumulated statement actually parses as one import.
+		// Capped so a genuinely malformed/non-import statement that merely
+		// starts with the word "import" can't run away to EOF.
+		let leading_ws = &line[..line.len() - line.trim_start().len()];
+		let mut merged = line.trim_end().to_string();
+		let mut end = i + 1;
+		let mut closed = false;
+		while end < lines.len() && end - i < 200 {
+			merged.push(' ');
+			merged.push_str(lines[end].trim());
+			end += 1;
+			if parse_import_line(&merged).is_some() {
+				closed = true;
+				break;
+			}
+		}
+
+		if closed {
+			out.push(format!("{leading_ws}{merged}"));
+			for _ in (i + 1)..end {
+				out.push(String::new());
+			}
+			i = end;
+		} else {
+			// Couldn't find a closing line — leave it exactly as found
+			// rather than guessing; it'll surface as-is (same as before
+			// this pass existed) instead of being silently mangled.
+			out.push(line.to_string());
+			i += 1;
+		}
+	}
+	out.join("\n")
+}
+
 #[must_use]
 pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
+	let source = collapse_multiline_imports(source);
 	let mut specifiers = Vec::new();
 	let lines: Vec<String> = source
 		.split('\n')
@@ -395,6 +535,17 @@ pub fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> 
 			let gap_len = after_export_kw.len() - after_export_kw.trim_start().len();
 			let after_export = &after_export_kw[gap_len..];
 
+			// `export async function foo() {}` — strip the `async ` prefix
+			// too (along with `export `) before matching against KINDS, so
+			// the emitted line keeps it: `async function foo() {}`.
+			let (async_prefix, after_export) = match after_export.strip_prefix("async") {
+				Some(rest) if rest.starts_with(|c: char| c.is_whitespace()) => {
+					let rest_trimmed = rest.trim_start();
+					("async ", rest_trimmed)
+				}
+				_ => ("", after_export),
+			};
+
 			for kind in KINDS {
 				let Some(after_kind) = after_export.strip_prefix(kind) else { continue };
 				if !after_kind.starts_with(|c: char| c.is_whitespace()) {
@@ -407,7 +558,7 @@ pub fn rewrite_export_declarations(source: &str, exported: &mut Vec<String>) -> 
 				}
 				let name = &trimmed[..name_end];
 				exported.push(format!("exports.{name} = {name};"));
-				return format!("{ws}{kind}{after_kind}");
+				return format!("{ws}{async_prefix}{kind}{after_kind}");
 			}
 			line.to_string()
 		})

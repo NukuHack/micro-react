@@ -458,12 +458,28 @@ pub fn use_state<T: Clone + 'static>(initial: T) -> (T, Rc<dyn Fn(T)>) {
 // ─── useState — cell-exposing variant: exposes the hook's live cell so JS
 // functional updates resolve against the current value, not a stale snapshot ───
 pub fn use_state_cell<T: Clone + 'static>(initial: T) -> (T, AnyCell, Rc<dyn Fn(T)>) {
+	use_state_cell_lazy(move || initial)
+}
+
+/// Same as [`use_state_cell`], but the initial value is computed by calling
+/// `init` — and `init` is only ever called the *first* time this hook slot
+/// is created, never on subsequent re-renders. This is what backs React's
+/// lazy-initializer form of `useState(() => expensiveComputation())`: the
+/// callback runs exactly once, not on every render. The eager `use_state_cell`
+/// above is just this with the value already computed by the caller, so an
+/// eager caller (already evaluating unconditionally, same as before this
+/// existed) is unaffected either way — but a caller that genuinely needs the
+/// "only on first mount" guarantee (notably the `useState` JS binding, which
+/// must not call an initializer function on every render) needs this variant
+/// specifically, since by the time a plain `T` reaches `use_state_cell` it's
+/// already been evaluated regardless of which render this is.
+pub fn use_state_cell_lazy<T: Clone + 'static>(init: impl FnOnce() -> T) -> (T, AnyCell, Rc<dyn Fn(T)>) {
 	let inst = current_inst();
 	let idx = hook_idx!(inst);
 	hook_idx_inc!(inst);
 
 	if hooks_len!(inst) <= idx {
-		let val: Box<dyn std::any::Any> = Box::new(initial);
+		let val: Box<dyn std::any::Any> = Box::new(init());
 		hooks_push!(inst, HookSlot::State { value: Rc::new(RefCell::new(val)) });
 	}
 

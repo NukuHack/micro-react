@@ -142,6 +142,128 @@ pub fn skip_js_comment(chars: &[char], i: usize) -> Option<usize> {
 	None
 }
 
+/// Keywords that can be directly followed by an expression — meaning a `/`
+/// right after one of them (well, after whitespace) starts a regex literal,
+/// not a division operator. Deliberately just the handful that show up in
+/// realistic code guarding a regex; this is a heuristic, not a full parser.
+const REGEX_PRECEDING_KEYWORDS: &[&str] =
+	&["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "do", "else", "yield", "case", "await"];
+
+/// True if a `/` at `chars[i]` should be read as the start of a regex
+/// literal rather than a division (or `/=`) operator — the same
+/// disambiguation a real JS tokenizer performs, based on the previous
+/// significant (non-whitespace, non-comment) character. Needed because,
+/// without it, a regex containing a quote character (`/"/`, `/['"]/`, a
+/// stray apostrophe inside `/don't/`, ...) gets misread by
+/// [`skip_js_string`] as the start of a real string — silently flipping
+/// quote parity for the remainder of the scan.
+fn regex_allowed_before(chars: &[char], i: usize) -> bool {
+	let mut j = i;
+	loop {
+		while j > 0 && chars[j - 1].is_whitespace() {
+			j -= 1;
+		}
+		if j >= 2 && chars[j - 2] == '*' && chars[j - 1] == '/' {
+			// Walk back over a `/* ... */` block comment to whatever
+			// precedes it, so it doesn't count as "the previous character".
+			let mut k = j - 2;
+			let mut opened = None;
+			while k > 0 {
+				k -= 1;
+				if chars[k] == '/' && chars.get(k + 1) == Some(&'*') {
+					opened = Some(k);
+					break;
+				}
+			}
+			match opened {
+				Some(k) => {
+					j = k;
+					continue;
+				}
+				None => break,
+			}
+		}
+		break;
+	}
+
+	let Some(&prev) = j.checked_sub(1).and_then(|k| chars.get(k)) else {
+		return true; // start of input — only an expression can open here
+	};
+
+	// Deliberately excludes `<`/`>`: real JS permits a regex right after
+	// them (`x < /re/.test(y)`), but this scanner runs over JSX-flavored
+	// source, where `<` immediately before `/` is essentially always the
+	// start of a closing tag (`</li>`) rather than a comparison — treating
+	// it as regex-permitting swallows the rest of the tag (and everything
+	// up to some unrelated later `/`) as fake regex content.
+	if matches!(prev, '(' | ',' | '=' | ':' | '[' | '!' | '&' | '|' | '?' | '{' | '}' | ';' | '+' | '-' | '*' | '%' | '^' | '~') {
+		return true;
+	}
+	if prev.is_alphanumeric() || prev == '_' || prev == '$' {
+		// End of an identifier, keyword, or number. Only specific keywords
+		// permit a regex right after; a plain identifier/number means this
+		// `/` is division.
+		let mut k = j;
+		while k > 0 {
+			let c = chars[k - 1];
+			if c.is_alphanumeric() || c == '_' || c == '$' {
+				k -= 1;
+			} else {
+				break;
+			}
+		}
+		let word: String = chars[k..j].iter().collect();
+		return REGEX_PRECEDING_KEYWORDS.contains(&word.as_str());
+	}
+	false
+}
+
+/// If `chars[i]` opens a regex literal (`/.../flags`), returns the index
+/// just past its trailing flags — correctly skipping backslash escapes and
+/// treating `/` inside a `[...]` character class as literal, so `/[a/b]/`
+/// doesn't end early. Returns `None` both when `chars[i]` isn't `/` and
+/// when context says it can't be a regex here (see [`regex_allowed_before`]),
+/// so callers can safely try this before falling back to treating `/` as
+/// an ordinary character (division, `/=`, etc).
+#[must_use]
+pub fn skip_js_regex(chars: &[char], i: usize) -> Option<usize> {
+	if chars.get(i) != Some(&'/') || !regex_allowed_before(chars, i) {
+		return None;
+	}
+	let n = chars.len();
+	// `//` and `/*` are comments, not regexes (callers try skip_js_comment
+	// first anyway, but stay correct if called standalone); an immediate
+	// `/` also can't be an empty regex literal (`//` is never valid JS).
+	if matches!(chars.get(i + 1), Some('/' | '*')) {
+		return None;
+	}
+	let mut j = i + 1;
+	let mut in_class = false;
+	while j < n {
+		match chars[j] {
+			'\\' => j += 2,
+			'[' => {
+				in_class = true;
+				j += 1;
+			}
+			']' if in_class => {
+				in_class = false;
+				j += 1;
+			}
+			'/' if !in_class => {
+				j += 1;
+				while j < n && chars[j].is_ascii_alphabetic() {
+					j += 1;
+				}
+				return Some(j);
+			}
+			'\n' => return None, // unterminated on this line — not a regex after all
+			_ => j += 1,
+		}
+	}
+	None
+}
+
 /// Finds the index of the `}` matching the `{` at `open` (which must point
 /// at a literal `{`), skipping over nested braces, JS strings/template
 /// literals, and comments so characters inside them can't corrupt the
@@ -154,6 +276,10 @@ pub fn find_matching_brace(chars: &[char], open: usize) -> Option<usize> {
 	let mut i = open;
 	while i < n {
 		if let Some(next) = skip_js_comment(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_regex(chars, i) {
 			i = next;
 			continue;
 		}

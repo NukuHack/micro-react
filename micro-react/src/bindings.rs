@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::Element;
 
 use crate::context::use_context;
-use crate::hooks::{DepVal, current_inst, current_weak, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell};
+use crate::hooks::{DepVal, current_inst, current_weak, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell_lazy};
 use crate::render::Root;
 use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode, VNodeInner};
 
@@ -343,10 +343,25 @@ pub fn get_fragment() -> JsValue {
 /// `useState(initialValue)` — returns `[value, setter]`. Supports functional
 /// updaters (`setState(prev => next)`), resolved against the hook's live
 /// cell at call time so they never see a stale snapshot.
+///
+/// Also supports React's *lazy initializer* form: if `initial` itself is a
+/// function, it's called with no arguments to produce the actual starting
+/// value — and, critically, only on the render that actually creates this
+/// hook slot, never again on re-renders. Without this, passing `() => expr`
+/// (the idiomatic way to avoid recomputing an expensive/side-effecting
+/// default on every render) would store the function itself as state
+/// instead of `expr`'s result.
 #[wasm_bindgen(js_name = useState)]
 #[must_use]
 pub fn js_use_state(initial: JsValue) -> Array {
-	let (value, cell, setter) = use_state_cell(initial);
+	let (value, cell, setter) = use_state_cell_lazy(move || {
+		if initial.is_function() {
+			let f: &Function = initial.unchecked_ref();
+			f.call0(&JsValue::NULL).unwrap_or(JsValue::UNDEFINED)
+		} else {
+			initial
+		}
+	});
 
 	let js_fn = cached_setter(&cell, || {
 		let cell = cell.clone();

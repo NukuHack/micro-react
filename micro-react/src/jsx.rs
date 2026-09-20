@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::scan::{find_matching_brace, scan_tag_name_end, skip_js_comment, skip_js_string};
+use crate::scan::{find_matching_brace, scan_tag_name_end, skip_js_comment, skip_js_regex, skip_js_string};
 
 /// Errors produced while transpiling JSX. Offsets are character indices
 /// into the source, not byte offsets, since scanning operates on `Vec<char>`.
@@ -261,6 +261,10 @@ fn find_jsx_expressions(chars: &[char]) -> Result<Vec<JsxSpan>, JsxError> {
 
 	while i < n {
 		if let Some(next) = skip_js_comment(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_regex(chars, i) {
 			i = next;
 			continue;
 		}
@@ -734,6 +738,11 @@ async fn load_module_body(
 	// what the browser does on its own here.
 	let js_code = transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
 	let js_code = crate::module_prep::rewrite_dynamic_imports(&js_code, absolute_url);
+	// `import.meta`/`import.meta.url` is a SyntaxError inside the plain
+	// function body the AsyncFunction constructor gives us below — rewrite
+	// it to a literal standing in for this module's own resolved URL
+	// before that constructor ever sees the source.
+	let js_code = crate::module_prep::rewrite_import_meta(&js_code, &resolved_url);
 
 	// 7. Map arguments and execute via the AsyncFunction constructor, so the
 	// module body can use top-level `await`.
