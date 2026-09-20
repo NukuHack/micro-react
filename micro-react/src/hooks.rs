@@ -252,13 +252,19 @@ pub fn take_boundary_absorbed() -> bool {
 	})
 }
 
-pub fn push_boundary(inst: Weak<RefCell<ComponentInst>>) {
-	BOUNDARY_STACK.with(|s| s.borrow_mut().push(inst));
+pub fn push_boundary(inst: &Weak<RefCell<ComponentInst>>) {
+	BOUNDARY_STACK.with(|s| {
+		let mut s = s.borrow_mut();
+		s.push(inst.clone());
+		crate::console_error!("[DEBUG push_boundary] ptr={:?} -> len={}", inst.as_ptr(), s.len());
+	});
 }
 
 pub fn pop_boundary() {
 	BOUNDARY_STACK.with(|s| {
-		s.borrow_mut().pop();
+		let mut s = s.borrow_mut();
+		let popped = s.pop();
+		crate::console_error!("[DEBUG pop_boundary] ptr={:?} -> len={}", popped.map(|w| w.as_ptr()), s.len());
 	});
 }
 
@@ -290,6 +296,13 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 	// independent re-render (its own setState) still find its ancestor
 	// boundary, since BOUNDARY_STACK would be empty in that situation.
 	let from_origin = origin.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
+	crate::console_error!(
+		"[DEBUG report_to_nearest_boundary] origin_ptr={:?} from_origin present: {}, from_origin has error_setter: {:?}, BOUNDARY_STACK len: {}",
+		Rc::as_ptr(origin),
+		from_origin.is_some(),
+		from_origin.as_ref().map(|i| i.borrow().error_setter.is_some()),
+		BOUNDARY_STACK.with(|s| s.borrow().len())
+	);
 
 	let target = from_origin.filter(|inst_rc| inst_rc.borrow().error_setter.is_some()).or_else(|| {
 		// Fall back to the dynamic call-stack view: covers a first-ever

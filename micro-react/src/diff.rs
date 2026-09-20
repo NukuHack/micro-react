@@ -416,6 +416,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 			// Mirrors React: an error propagates to the nearest ErrorBoundary;
 			// with none, it's uncaught, so log it and render nothing for
 			// this subtree instead of unmounting the whole tree.
+			crate::console_error!("[DEBUG diff_component] {:?} (origin_ptr={:?}) threw during render", new_vnode.type_tag(), Rc::as_ptr(&inst_rc));
 			if !crate::hooks::report_to_nearest_boundary(&inst_rc, err.clone()) {
 				crate::console_error!(
 					"[micro-react] uncaught error in component render (no boundary above): {}",
@@ -472,7 +473,7 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// the boundary stack while diffing its own subtree, the only window a descendant's failure can report to it.
 	let is_boundary = inst_rc.borrow().error_setter.is_some();
 	if is_boundary {
-		crate::hooks::push_boundary(Rc::downgrade(&inst_rc));
+		crate::hooks::push_boundary(&Rc::downgrade(&inst_rc));
 	}
 	// catch_unwind here too: the render call only protects the render fn
 	// itself. The reconciliation that follows can also panic (e.g. tearing
@@ -611,6 +612,30 @@ pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 	};
 	rendered.depth = depth + 1;
 
+	// `BOUNDARY_STACK` is a dynamic, call-stack-only view: normally it's
+	// rebuilt from scratch on every top-down walk, by each ancestor
+	// boundary's own `diff_component` pushing itself before diffing its
+	// children. `rerender_component` isn't part of such a walk — it's a
+	// targeted re-render of just this one dirty instance, invoked directly
+	// by the scheduler — so without restoring it here, `BOUNDARY_STACK` is
+	// simply empty for the whole call, no matter where in the tree this
+	// instance actually sits. That's invisible for a re-render whose own
+	// output is unchanged in shape, but breaks the moment this render
+	// freshly *mounts* a new descendant (e.g. a route swap first rendering
+	// a `lazy()` page): that descendant's `ComponentInst` is brand new, so
+	// it has no persisted `nearest_boundary` of its own yet, and its
+	// `report_to_nearest_boundary` fallback lookup via `current_boundary()`
+	// would find nothing — even though a Suspense/ErrorBoundary really is
+	// sitting above it, just not currently on the stack. Pushing this
+	// instance's own persisted ancestor boundary first reconstructs that
+	// ambient context, matching what a full walk from the boundary down to
+	// here would have had.
+	let ambient_boundary = inst_rc.borrow().nearest_boundary.clone();
+	crate::console_error!("[DEBUG rerender_component] self_ptr={:?} ambient_boundary present: {}", Rc::as_ptr(inst_rc), ambient_boundary.is_some());
+	if let Some(w) = ambient_boundary.clone() {
+		crate::hooks::push_boundary(&w);
+	}
+
 	// Same reasoning as in diff_component: if an ancestor ErrorBoundary
 	// already absorbed this throw, our old DOM node was repurposed by its
 	// fallback; diffing `null` against it now would tear it back out.
@@ -624,8 +649,12 @@ pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 
 	let is_boundary = inst_rc.borrow().error_setter.is_some();
 	if is_boundary {
-		crate::hooks::push_boundary(Rc::downgrade(inst_rc));
+		crate::hooks::push_boundary(&Rc::downgrade(inst_rc));
 	}
+	if ambient_boundary.is_some() {
+		crate::hooks::pop_boundary();
+	}
+
 	// See the matching catch_unwind in diff_component: reconciliation itself
 	// (not just render) needs to be panic-safe, since this is the call that
 	// runs when an ErrorBoundary's setError() swaps in its fallback UI.
