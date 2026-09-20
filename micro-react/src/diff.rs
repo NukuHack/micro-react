@@ -89,6 +89,7 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 			let text = text.clone();
 			// Reuse existing text node if possible
 			if let Some(old) = old_vnode
+				&& matches!(old.inner, VNodeInner::Text(_))
 				&& let Some(existing) = &old.dom_node
 				&& let Ok(txt) = existing.clone().dyn_into::<Text>()
 			{
@@ -98,10 +99,22 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 				new_vnode.dom_node = Some(txt.into());
 				return Ok(new_vnode.dom_node.clone());
 			}
+			// Old vnode was some other kind (element/component/fragment):
+			// tear it down and swap its DOM for the new text node.
+			let mut stale_nodes: Vec<Node> = Vec::new();
+			if let Some(old) = old_vnode
+				&& !matches!(old.inner, VNodeInner::Text(_))
+			{
+				dom_nodes_of(old, &mut stale_nodes);
+				unmount_vnode(old, true);
+			}
 			let doc = document();
 			let txt = doc.create_text_node(&text);
 			let node: Node = txt.into();
 			new_vnode.dom_node = Some(node.clone());
+			if !stale_nodes.is_empty() {
+				splice_replacement(parent_dom, &stale_nodes, std::slice::from_ref(&node))?;
+			}
 			Ok(Some(node))
 		}
 
@@ -114,6 +127,104 @@ fn diff_node_inner(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&
 	}
 }
 
+// ─── Multi-node DOM helpers ───
+//
+// A `Fragment` (or a `Component` that renders one, e.g. a page returning
+// `<>…</>`) occupies *several* top-level DOM nodes, but `VNode::dom_node`
+// only ever holds the first. Anything that replaces, moves or removes such
+// a vnode by `dom_node` alone leaves the other nodes behind (they pile up
+// at the end of the parent) — so these helpers work on the full set.
+
+/// Every top-level DOM node `vnode` currently occupies, in document order.
+/// Must be called *before* `unmount_vnode`, which takes component
+/// instances out of their slots (after which their nodes are unreachable).
+fn dom_nodes_of(vnode: &VNode, out: &mut Vec<Node>) {
+	match &vnode.inner {
+		VNodeInner::Fragment { children, .. } => {
+			for c in &children.0 {
+				dom_nodes_of(c, out);
+			}
+		}
+		VNodeInner::Component { inst, .. } => {
+			let inst_rc = inst.0.borrow().clone();
+			if let Some(i) = inst_rc {
+				let b = i.borrow();
+				if let Some(lv) = &b.last_vnode {
+					dom_nodes_of(lv, out);
+				}
+			}
+		}
+		VNodeInner::Portal { .. } | VNodeInner::Null => {}
+		VNodeInner::Element { .. } | VNodeInner::Text(_) => {
+			if let Some(d) = &vnode.dom_node {
+				out.push(d.clone());
+			}
+		}
+	}
+}
+
+fn is_child_of(node: &Node, parent_dom: &Node) -> bool {
+	node.parent_node().is_some_and(|p| p.is_same_node(Some(parent_dom)))
+}
+
+/// `cursor`, but only if it is really still a child of `parent_dom` — an
+/// `insertBefore` against a detached reference node throws `NotFoundError`.
+fn usable_anchor(parent_dom: &Node, cursor: Option<&Node>) -> Option<Node> {
+	cursor.filter(|c| is_child_of(c, parent_dom)).cloned()
+}
+
+/// Put `new_nodes` where `stale` used to be (before its first still-attached
+/// node) and remove every stale node not reused by the new set.
+fn splice_replacement(parent_dom: &Node, stale: &[Node], new_nodes: &[Node]) -> Result<(), JsValue> {
+	let anchor = stale.iter().find(|n| is_child_of(n, parent_dom)).cloned();
+	if let Some(anchor) = &anchor {
+		for n in new_nodes {
+			if !n.is_same_node(Some(anchor)) {
+				parent_dom.insert_before(n, Some(anchor))?;
+			}
+		}
+	} else {
+		// Nothing left to anchor against — at least make sure the new
+		// nodes are attached rather than silently lost.
+		for n in new_nodes {
+			if n.parent_node().is_none() {
+				parent_dom.append_child(n)?;
+			}
+		}
+	}
+	for s in stale {
+		if new_nodes.iter().any(|n| n.is_same_node(Some(s))) {
+			continue;
+		}
+		if let Some(p) = s.parent_node() {
+			let _ = p.remove_child(s);
+		}
+	}
+	Ok(())
+}
+
+/// Ensures all of `nodes` sit contiguously, in order, at `cursor` (the
+/// position the next child is expected at). No-op when already in place.
+fn place_nodes(parent_dom: &Node, nodes: &[Node], cursor: Option<&Node>) -> Result<(), JsValue> {
+	let (Some(first), Some(last)) = (nodes.first(), nodes.last()) else {
+		return Ok(());
+	};
+	let contiguous = nodes.iter().all(|n| is_child_of(n, parent_dom))
+		&& nodes.windows(2).all(|w| w[0].next_sibling().is_some_and(|s| s.is_same_node(Some(&w[1]))));
+	if contiguous
+		&& cursor.map_or_else(
+			|| last.next_sibling().is_none(),
+			|c| first.is_same_node(Some(c)) || last.next_sibling().is_some_and(|s| s.is_same_node(Some(c))),
+		) {
+		return Ok(());
+	}
+	let anchor = usable_anchor(parent_dom, cursor);
+	for n in nodes {
+		parent_dom.insert_before(n, anchor.as_ref())?;
+	}
+	Ok(())
+}
+
 // ─── Fragment ───
 
 fn diff_fragment(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNode>, ns: &str) -> Result<Option<Node>, JsValue> {
@@ -122,12 +233,20 @@ fn diff_fragment(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VN
 		_ => unreachable!(),
 	};
 
-	let old_children = old_vnode
-		.and_then(|o| match &o.inner {
-			VNodeInner::Fragment { children, .. } => Some(children.0.clone()),
-			_ => None,
-		})
-		.unwrap_or_default();
+	// `old_vnode` may be some *other* kind of vnode (a component's root
+	// changing shape, e.g. a fallback element -> a page fragment). It can't
+	// be diffed against, but it must still be torn down and its DOM
+	// replaced, or it stays in the page forever.
+	let mut stale_nodes: Vec<Node> = Vec::new();
+	let old_children = old_vnode.map_or_else(Vec::new, |o| {
+		if let VNodeInner::Fragment { children, .. } = &o.inner {
+			children.0.clone()
+		} else {
+			dom_nodes_of(o, &mut stale_nodes);
+			unmount_vnode(o, true);
+			Vec::new()
+		}
+	});
 
 	let mut new_children = children;
 	diff_children(parent_dom, &mut new_children, &old_children, ns, None)?;
@@ -135,6 +254,11 @@ fn diff_fragment(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VN
 	new_vnode.dom_node = new_children.first().and_then(|c| c.dom_node.clone());
 	if let VNodeInner::Fragment { children: c, .. } = &mut new_vnode.inner {
 		*c = Children(new_children);
+	}
+	if !stale_nodes.is_empty() {
+		let mut new_nodes: Vec<Node> = Vec::new();
+		dom_nodes_of(new_vnode, &mut new_nodes);
+		splice_replacement(parent_dom, &stale_nodes, &new_nodes)?;
 	}
 	Ok(new_vnode.dom_node.clone())
 }
@@ -204,7 +328,13 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 	// Namespace propagation
 	let ns = effective_ns(&tag, ns);
 
-	let old_elem = old_vnode.and_then(|o| o.dom_node.clone().and_then(|n| n.dyn_into::<Element>().ok()));
+	// Only an old *Element* vnode's DOM is reusable. A Component/Fragment/…
+	// that merely happened to start with the same tag is torn down and
+	// replaced below (it may span several nodes; reusing just the first
+	// would strand the rest).
+	let old_elem = old_vnode.and_then(|o| {
+		if matches!(o.inner, VNodeInner::Element { .. }) { o.dom_node.clone().and_then(|n| n.dyn_into::<Element>().ok()) } else { None }
+	});
 
 	// Set to `None` if we end up creating a brand new DOM element below (tag
 	// mismatch), since at that point the old vnode's subtree — including any
@@ -227,35 +357,26 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 			e
 		}
 		_other => {
-			// Unmount old tree if replacing a different element. Tear down its
-			// hooks/effects/refs, but leave its DOM node attached for now
-			// (skip_remove=true) — diff_element can be reached two ways:
-			// through diff_children's list matching (where old/new never
-			// share a type_tag for a tag mismatch, so old_vnode here is
-			// always None and this branch is just a fresh mount with nothing
-			// to swap) or directly from diff_component's single-child
-			// `diff_node(parent_dom, &mut rendered, old_rendered, ns)` call
-			// when a component's own rendered root element changes tag
-			// across a re-render (e.g. `<Routes>` falling from a matched
-			// route's `<div>` to the `<p>404</p>` default). In that second
-			// case nothing else ever inserts the new node or removes the
-			// old one — diff_component only swaps DOM for its *own*
-			// component-identity mismatches (`stale_dom`), not for a
-			// mismatch inside the vnode it rendered — so without splicing
-			// here the old node would leak in the DOM forever and the new
-			// one would never appear.
-			let stale_dom: Option<Node> = old_vnode.and_then(|o| o.dom_node.clone());
+			// Replacing a different element (or a different kind of vnode
+			// altogether). Collect *every* DOM node the old vnode occupies
+			// first — unmount_vnode takes component instances out of their
+			// slots, after which their nodes can no longer be found — then
+			// tear it down keeping its DOM attached (skip_remove=true),
+			// create the new element, and splice it in where the old nodes
+			// were. Reached both via diff_children's matching (old_vnode is
+			// always None there) and directly from a component's
+			// single-root `diff_node`, where nothing else would ever insert
+			// the new node or remove the old ones.
+			let mut stale_nodes: Vec<Node> = Vec::new();
 			if let Some(old) = old_vnode {
+				dom_nodes_of(old, &mut stale_nodes);
 				unmount_vnode(old, true);
 			}
 			let doc = document();
 			let new_elem = if let Some(ns) = ns_uri(&ns) { doc.create_element_ns(Some(ns), &tag)? } else { doc.create_element(&tag)? };
-			if let Some(stale) = &stale_dom {
+			if !stale_nodes.is_empty() {
 				let new_node: Node = new_elem.clone().into();
-				parent_dom.insert_before(&new_node, Some(stale))?;
-				if let Some(p) = stale.parent_node() {
-					let _ = p.remove_child(stale);
-				}
+				splice_replacement(parent_dom, &stale_nodes, std::slice::from_ref(&new_node))?;
 			}
 			old_vnode = None;
 			new_elem
@@ -350,7 +471,12 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// Captured before unmount_vnode below (skip_remove=true leaves it
 	// attached) so we can atomically swap it for the freshly-mounted DOM
 	// once that's ready, instead of leaving it as a permanent orphan.
-	let stale_dom: Option<Node> = if type_mismatch { old_vnode.and_then(|o| o.dom_node.clone()) } else { None };
+	let mut stale_nodes: Vec<Node> = Vec::new();
+	if type_mismatch && let Some(old) = old_vnode {
+		// Every top-level node the old vnode occupies, not just the first:
+		// an old page that rendered a Fragment spans several.
+		dom_nodes_of(old, &mut stale_nodes);
+	}
 	if type_mismatch {
 		// Tear the mismatched instance down properly (effect cleanups etc.)
 		// instead of leaking it or letting it silently masquerade as this
@@ -416,7 +542,6 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 			// Mirrors React: an error propagates to the nearest ErrorBoundary;
 			// with none, it's uncaught, so log it and render nothing for
 			// this subtree instead of unmounting the whole tree.
-			crate::console_error!("[DEBUG diff_component] {:?} (origin_ptr={:?}) threw during render", new_vnode.type_tag(), Rc::as_ptr(&inst_rc));
 			if !crate::hooks::report_to_nearest_boundary(&inst_rc, err.clone()) {
 				crate::console_error!(
 					"[micro-react] uncaught error in component render (no boundary above): {}",
@@ -533,24 +658,23 @@ fn diff_component(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&V
 	// parent's tree always has an accurate reference for this slot.
 	new_vnode.dom_node = inst_rc.borrow().last_vnode.as_ref().and_then(|v| v.dom_node.clone());
 
-	// Finish the swap started above: the mismatched old node (if any) is
-	// still attached at its original position. Splice the new one in right
-	// beside it, then drop the old — both calls target `parent_dom`
-	// directly, so this doesn't depend on (or disturb) whatever anchor an
-	// ancestor diff_children loop is currently holding.
-	if let Some(stale) = stale_dom {
-		if let Some(new_dom) = &new_vnode.dom_node {
-			parent_dom.insert_before(new_dom, Some(&stale))?;
-		}
-		if let Some(p) = stale.parent_node() {
-			let _ = p.remove_child(&stale);
-		}
-	}
-
 	// Stash the (possibly newly-created) instance on the new vnode so the
-	// *next* render can find it via old_vnode.
+	// *next* render can find it via old_vnode. Done before the swap below so
+	// `dom_nodes_of(new_vnode)` can see everything this component rendered.
 	if let VNodeInner::Component { inst: slot, .. } = &new_vnode.inner {
 		*slot.0.borrow_mut() = Some(inst_rc);
+	}
+
+	// Finish the swap started above: the mismatched old vnode's nodes (all
+	// of them) are still attached at their original position. Splice the
+	// new vnode's nodes in before the first of them, then drop the old ones
+	// — both calls target `parent_dom` directly, so this doesn't depend on
+	// (or disturb) whatever anchor an ancestor diff_children loop is
+	// currently holding.
+	if !stale_nodes.is_empty() {
+		let mut new_nodes: Vec<Node> = Vec::new();
+		dom_nodes_of(new_vnode, &mut new_nodes);
+		splice_replacement(parent_dom, &stale_nodes, &new_nodes)?;
 	}
 
 	Ok(dom)
@@ -630,15 +754,11 @@ pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 	// instance's own persisted ancestor boundary first reconstructs that
 	// ambient context, matching what a full walk from the boundary down to
 	// here would have had.
-	let ambient_boundary = inst_rc.borrow().nearest_boundary.clone();
-	crate::console_error!("[DEBUG rerender_component] self_ptr={:?} ambient_boundary present: {}", Rc::as_ptr(inst_rc), ambient_boundary.is_some());
-	if let Some(w) = ambient_boundary.clone() {
-		crate::hooks::push_boundary(&w);
-	}
-
 	// Same reasoning as in diff_component: if an ancestor ErrorBoundary
 	// already absorbed this throw, our old DOM node was repurposed by its
 	// fallback; diffing `null` against it now would tear it back out.
+	// (Checked before touching BOUNDARY_STACK so this early return can't
+	// leave a pushed entry behind.)
 	if crate::hooks::take_boundary_absorbed() {
 		let mut inst = inst_rc.borrow_mut();
 		if inst.render_generation == my_generation {
@@ -647,12 +767,17 @@ pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 		return;
 	}
 
+	// The ambient boundary must stay on the stack for the *entire* diff_node
+	// below (it was previously popped before diff_node ran, so a freshly
+	// mounted lazy() child threw into an empty stack). Order on the stack:
+	// [ambient ancestor boundary, (self, if self is a boundary)].
+	let ambient_boundary = inst_rc.borrow().nearest_boundary.clone();
+	if let Some(w) = ambient_boundary.as_ref() {
+		crate::hooks::push_boundary(w);
+	}
 	let is_boundary = inst_rc.borrow().error_setter.is_some();
 	if is_boundary {
 		crate::hooks::push_boundary(&Rc::downgrade(inst_rc));
-	}
-	if ambient_boundary.is_some() {
-		crate::hooks::pop_boundary();
 	}
 
 	// See the matching catch_unwind in diff_component: reconciliation itself
@@ -671,6 +796,9 @@ pub fn rerender_component(inst_rc: &Rc<RefCell<ComponentInst>>) {
 			}
 		};
 	if is_boundary {
+		crate::hooks::pop_boundary();
+	}
+	if ambient_boundary.is_some() {
 		crate::hooks::pop_boundary();
 	}
 	// Same follow-up check as in diff_component: a reconciliation panic
@@ -769,7 +897,17 @@ pub fn diff_children(
 	}
 
 	// Phase 2: diff each child
-	let mut old_dom: Option<Node> = old_children.first().and_then(|c| c.dom_node.clone());
+	// Every top-level DOM node of the old list, captured up front: diffing a
+	// child can unmount old components (their instances are taken out of
+	// their slots, after which their nodes can no longer be found) or remove
+	// old nodes, so a cursor computed from them *before* diffing goes stale
+	// (an `insertBefore` against a removed node throws NotFoundError).
+	let mut old_nodes: Vec<Node> = Vec::new();
+	for c in old_children {
+		dom_nodes_of(c, &mut old_nodes);
+	}
+	// Last DOM node of the previous child that occupies any DOM.
+	let mut prev_last: Option<Node> = None;
 
 	for i in 0..new_len {
 		let cv = &mut new_children[i];
@@ -780,16 +918,33 @@ pub fn diff_children(
 
 		let _ = diff_node(parent_dom, cv, old_vn, ns)?;
 
-		// Components are excluded from pre-diff FLAG_INSERT since their shape
-		// doesn't reflect what they render; use post-diff attachment instead.
-		let already_attached = cv.dom_node.as_ref().and_then(Node::parent_node).is_some_and(|p| p.is_same_node(Some(parent_dom)));
-		let should_insert = (cv.flags & FLAG_INSERT) != 0 || !already_attached;
+		// Where this child belongs, computed *after* diffing it (so it
+		// reflects any nodes that diff just removed): right after the
+		// previous child, or — for the first — at the first old node still
+		// in the document.
+		let cursor: Option<Node> =
+			prev_last.as_ref().map_or_else(|| old_nodes.iter().find(|n| is_child_of(n, parent_dom)).cloned(), Node::next_sibling);
 
-		if should_insert && let Some(dom) = &cv.dom_node {
-			parent_dom.insert_before(dom, old_dom.as_ref())?;
+		if matches!(cv.inner, VNodeInner::Element { .. } | VNodeInner::Text(_)) {
+			let already_attached = cv.dom_node.as_ref().and_then(Node::parent_node).is_some_and(|p| p.is_same_node(Some(parent_dom)));
+			let should_insert = (cv.flags & FLAG_INSERT) != 0 || !already_attached;
+
+			if should_insert && let Some(dom) = &cv.dom_node {
+				let anchor = usable_anchor(parent_dom, cursor.as_ref());
+				parent_dom.insert_before(dom, anchor.as_ref())?;
+			}
+		} else {
+			// Components/fragments may occupy several top-level nodes (e.g.
+			// a page returning `<>…</>`); their shape doesn't reflect what
+			// they render, so position *all* of their nodes post-diff, not
+			// just the first (`dom_node`) — otherwise the rest are left
+			// wherever they were first appended (the end of the parent).
+			let mut nodes: Vec<Node> = Vec::new();
+			dom_nodes_of(cv, &mut nodes);
+			place_nodes(parent_dom, &nodes, cursor.as_ref())?;
 		}
 		if let Some(last) = last_dom_of(cv) {
-			old_dom = last.next_sibling();
+			prev_last = Some(last);
 		}
 
 		cv.flags &= !(FLAG_INSERT | FLAG_MATCHED);
@@ -912,9 +1067,12 @@ pub fn unmount_vnode(vnode: &VNode, skip_remove: bool) {
 
 				// Recurse into what this component last rendered so nested
 				// elements/components get torn down too, not just this component's own top-level DOM.
+				// Pass `skip_remove` through: a component whose root is a
+				// Fragment spans several DOM nodes, and the single
+				// `vnode.dom_node` removal below only reaches the first.
 				let last_rendered = inst_rc.borrow().last_vnode.clone();
 				if let Some(rendered) = last_rendered {
-					unmount_vnode(&rendered, true);
+					unmount_vnode(&rendered, skip_remove);
 				}
 				// inst_rc drops here, freeing the ComponentInst now that
 				// nothing else needs it synchronously.

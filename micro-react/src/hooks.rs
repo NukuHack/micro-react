@@ -32,6 +32,12 @@ pub struct ComponentInst {
 	pub parent_dom: Option<web_sys::Element>,
 	pub error_setter: Option<Rc<dyn Fn(JsValue)>>,
 
+	/// True for a `Suspense` instance. A thrown thenable (a pending
+	/// `lazy()`/data promise) is routed to the nearest *suspense* boundary
+	/// (skipping any `ErrorBoundary` in between, like React) and handled
+	/// without the synchronous "absorb + unwind" path real errors use.
+	pub is_suspense: bool,
+
 	/// The nearest ancestor `ErrorBoundary` as of this instance's last full
 	/// diff pass (see `hooks::current_boundary` / `report_to_nearest_boundary`).
 	/// Persisted (unlike `BOUNDARY_STACK`, which only reflects the *current*
@@ -76,6 +82,7 @@ impl std::fmt::Debug for ComponentInst {
 			.field("depth", &self.depth)
 			.field("parent_dom", &self.parent_dom)
 			.field("error_setter", &OpaqueSetter(&self.error_setter))
+			.field("is_suspense", &self.is_suspense)
 			.field("nearest_boundary", &self.nearest_boundary)
 			.field("render_generation", &self.render_generation)
 			.field("render_fn", &self.render_fn)
@@ -98,6 +105,7 @@ impl ComponentInst {
 			depth: 0,
 			parent_dom: None,
 			error_setter: None,
+			is_suspense: false,
 			nearest_boundary: None,
 			render_generation: 0,
 			render_fn: None,
@@ -242,6 +250,16 @@ thread_local! {
 	static BOUNDARY_ABSORBED: RefCell<bool> = const { RefCell::new(false) };
 }
 
+thread_local! {
+	/// Boundaries currently inside a forced `report_to_nearest_boundary`
+	/// re-render. A boundary that hands the value back (e.g. Suspense given
+	/// a real error, with no ErrorBoundary above) doesn't change state, so
+	/// the forced re-render re-throws the same error into the same boundary,
+	/// forever ("Max render depth exceeded"). A nested report to a boundary
+	/// already being handled is treated as uncaught instead.
+	static REPORTING: RefCell<Vec<*const RefCell<ComponentInst>>> = const { RefCell::new(Vec::new()) };
+}
+
 /// See `BOUNDARY_ABSORBED` above. Read-and-clear.
 #[must_use]
 pub fn take_boundary_absorbed() -> bool {
@@ -254,17 +272,13 @@ pub fn take_boundary_absorbed() -> bool {
 
 pub fn push_boundary(inst: &Weak<RefCell<ComponentInst>>) {
 	BOUNDARY_STACK.with(|s| {
-		let mut s = s.borrow_mut();
-		s.push(inst.clone());
-		crate::console_error!("[DEBUG push_boundary] ptr={:?} -> len={}", inst.as_ptr(), s.len());
+		s.borrow_mut().push(inst.clone());
 	});
 }
 
 pub fn pop_boundary() {
 	BOUNDARY_STACK.with(|s| {
-		let mut s = s.borrow_mut();
-		let popped = s.pop();
-		crate::console_error!("[DEBUG pop_boundary] ptr={:?} -> len={}", popped.map(|w| w.as_ptr()), s.len());
+		s.borrow_mut().pop();
 	});
 }
 
@@ -277,6 +291,26 @@ pub fn pop_boundary() {
 #[must_use]
 pub fn current_boundary() -> Option<Weak<RefCell<ComponentInst>>> {
 	BOUNDARY_STACK.with(|s| s.borrow().last().cloned())
+}
+
+/// Nearest live `Suspense` above `origin`: first via the persisted
+/// `nearest_boundary` chain (skipping non-Suspense boundaries), then via
+/// the dynamic `BOUNDARY_STACK` (a brand-new instance has no persisted
+/// boundary yet).
+fn find_suspense(origin: &Rc<RefCell<ComponentInst>>) -> Option<Rc<RefCell<ComponentInst>>> {
+	let mut cur = origin.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
+	let mut hops = 0_u32;
+	while let Some(c) = cur {
+		if c.borrow().is_suspense {
+			return Some(c);
+		}
+		cur = c.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
+		hops += 1;
+		if hops > 4096 {
+			break;
+		}
+	}
+	BOUNDARY_STACK.with(|s| s.borrow().iter().rev().filter_map(Weak::upgrade).find(|i| i.borrow().is_suspense))
 }
 
 /// Hand a render/reconciliation failure to the nearest live `ErrorBoundary`
@@ -292,17 +326,28 @@ pub fn current_boundary() -> Option<Weak<RefCell<ComponentInst>>> {
 /// has the right instance sitting in scope as `inst_rc`, so just use that
 /// directly instead of going through fragile ambient state.
 pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsValue) -> bool {
+	// A thrown thenable means "suspend", not "error". Hand it to the nearest
+	// Suspense and let its state update re-render it through the normal
+	// scheduler. Deliberately NOT the synchronous force-rerender + absorb
+	// used for real errors below: that unwinds an in-progress diff whose
+	// remaining siblings (a layout's footer, modal, ...) would keep
+	// mounting fresh DOM next to the fallback. Here the throwing component
+	// just renders nothing, the current pass finishes coherently, and the
+	// Suspense swaps in its fallback right after.
+	if crate::bindings::is_thenable(&err)
+		&& let Some(suspense) = find_suspense(origin)
+	{
+		let setter = suspense.borrow().error_setter.clone();
+		if let Some(setter) = setter {
+			setter(err);
+			return true;
+		}
+	}
+
 	// Prefer `origin`'s own persisted `nearest_boundary`: this lets a later,
 	// independent re-render (its own setState) still find its ancestor
 	// boundary, since BOUNDARY_STACK would be empty in that situation.
 	let from_origin = origin.borrow().nearest_boundary.clone().and_then(|w| w.upgrade());
-	crate::console_error!(
-		"[DEBUG report_to_nearest_boundary] origin_ptr={:?} from_origin present: {}, from_origin has error_setter: {:?}, BOUNDARY_STACK len: {}",
-		Rc::as_ptr(origin),
-		from_origin.is_some(),
-		from_origin.as_ref().map(|i| i.borrow().error_setter.is_some()),
-		BOUNDARY_STACK.with(|s| s.borrow().len())
-	);
 
 	let target = from_origin.filter(|inst_rc| inst_rc.borrow().error_setter.is_some()).or_else(|| {
 		// Fall back to the dynamic call-stack view: covers a first-ever
@@ -322,14 +367,21 @@ pub fn report_to_nearest_boundary(origin: &Rc<RefCell<ComponentInst>>, err: JsVa
 
 	let Some(inst_rc) = target else { return false };
 
+	let key = Rc::as_ptr(&inst_rc);
+	if REPORTING.with(|r| r.borrow().contains(&key)) {
+		return false;
+	}
+
 	let setter = inst_rc.borrow().error_setter.clone();
 	let Some(setter) = setter else { return false };
+	REPORTING.with(|r| r.borrow_mut().push(key));
 	setter(err);
 
 	// The setter above only schedules a re-render for the next microtask,
 	// which isn't guaranteed to run before paint. Force it now so the
 	// fallback UI appears in this same synchronous pass.
 	crate::diff::rerender_component(&inst_rc);
+	REPORTING.with(|r| r.borrow_mut().retain(|p| *p != key));
 
 	// The boundary's DOM subtree has now been replaced by the fallback UI;
 	// tell the still-unwinding failing component not to touch it.

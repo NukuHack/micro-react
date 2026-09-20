@@ -490,7 +490,7 @@ impl RouteEntry {
 /// eventually handing the reconciler a stale `dom_node` reference and producing
 /// an `insertBefore` failure. Giving each clone its own fresh slot keeps
 /// every activation's component identity independent, as intended.
-fn fresh_instance(vnode: &VNode) -> VNode {
+pub(crate) fn fresh_instance(vnode: &VNode) -> VNode {
 	let mut v = vnode.clone();
 	match &mut v.inner {
 		VNodeInner::Component { inst, children, .. } => {

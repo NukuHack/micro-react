@@ -766,10 +766,18 @@ fn js_create_error_boundary_inner(props: &JsValue) -> JsValue {
 			let f: Function = fallback.dyn_into().expect("fallback.is_function() checked above");
 			return f.call1(&JsValue::NULL, &error).unwrap_or(JsValue::NULL);
 		}
-		return fallback;
+		return fresh_js_vnode(&fallback);
 	}
 
 	Reflect::get(props, &"children".into()).unwrap_or(JsValue::NULL)
+}
+
+/// Re-materialises a JS vnode that lives in a long-lived place (e.g. a
+/// `fallback` prop) as a brand-new single-use JS vnode: peeks (doesn't
+/// consume) the stored vnode and gives the copy its own component
+/// instance slots.
+fn fresh_js_vnode(v: &JsValue) -> JsValue {
+	js_to_vnode_peek(v).map_or(JsValue::NULL, |vn| vnode_to_js(crate::router::fresh_instance(&vn)).unwrap_or(JsValue::NULL))
 }
 
 // ─── Suspense component factory ───
@@ -778,7 +786,7 @@ fn js_create_error_boundary_inner(props: &JsValue) -> JsValue {
 /// convention a component uses to "suspend" (throw a pending promise rather
 /// than a real error) so `Suspense` knows to render its fallback and retry
 /// once the promise settles, instead of treating it as an uncaught error.
-fn is_thenable(v: &JsValue) -> bool {
+pub(crate) fn is_thenable(v: &JsValue) -> bool {
 	if !v.is_object() {
 		return false;
 	}
@@ -857,11 +865,18 @@ fn js_create_suspense_inner(props: &JsValue) -> JsValue {
 		// SAFETY: single-threaded WASM; inst_ptr is valid for this render.
 		unsafe {
 			(*inst_ptr).error_setter = Some(rc_setter);
+			(*inst_ptr).is_suspense = true;
 		}
 	}
 
 	if is_thenable(&caught) {
-		return Reflect::get(props, &"fallback".into()).unwrap_or(JsValue::NULL);
+		// `fallback` lives in `props` and is re-read every time this
+		// Suspense suspends. A JS vnode is consumed on first read, so hand
+		// the reconciler a fresh copy instead of the prop itself — otherwise
+		// the 2nd suspend logs "vnode id N was already consumed" and
+		// renders no fallback at all.
+		let fallback = Reflect::get(props, &"fallback".into()).unwrap_or(JsValue::NULL);
+		return fresh_js_vnode(&fallback);
 	}
 
 	Reflect::get(props, &"children".into()).unwrap_or(JsValue::NULL)

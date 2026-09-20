@@ -389,6 +389,12 @@ fn is_css_url(url: &web_sys::Url) -> bool {
 	pathname.rsplit('/').next().unwrap_or("").to_ascii_lowercase().ends_with(".css")
 }
 
+/// True if `url`'s final path segment is a `.json` file (query/hash ignored).
+fn is_json_url(url: &web_sys::Url) -> bool {
+	let pathname = url.pathname();
+	pathname.rsplit('/').next().unwrap_or("").to_ascii_lowercase().ends_with(".json")
+}
+
 thread_local! {
 	static INJECTED_STYLESHEETS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
@@ -575,6 +581,46 @@ async fn load_module_body(
 			js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
 			js_sys::Reflect::set(&result_obj, &"named".into(), &js_sys::Array::new())?;
 			promises.push(&js_sys::Promise::resolve(&result_obj));
+			continue;
+		}
+
+		// JSON specifiers (`import data from './x.json'`) are data, not JS:
+		// fetch + parse them instead of running them through the JSX
+		// transpiler / AsyncFunction (which fails on the first `:`). Like
+		// Vite, the parsed value is the default export, and — when it's a
+		// plain object — its top-level keys are also available as named
+		// exports.
+		if is_json_url(&web_sys::Url::new(&child_url)?) {
+			let json_url = child_url.clone();
+			let fut = async move {
+				let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
+				let resp: web_sys::Response = JsFuture::from(window.fetch_with_str(&json_url)).await?.dyn_into()?;
+				if !resp.ok() {
+					return Err(JsValue::from_str(&format!("Failed to fetch JSON from '{}': {} {}", json_url, resp.status(), resp.status_text())));
+				}
+				let value = JsFuture::from(resp.json()?).await?;
+				let child_exports = js_sys::Object::new();
+				js_sys::Reflect::set(&child_exports, &"default".into(), &value)?;
+				if value.is_object() && !js_sys::Array::is_array(&value) {
+					for key in js_sys::Object::keys(&value.clone().dyn_into::<js_sys::Object>()?).iter() {
+						js_sys::Reflect::set(&child_exports, &key, &js_sys::Reflect::get(&value, &key)?)?;
+					}
+				}
+				let result_obj = js_sys::Object::new();
+				js_sys::Reflect::set(&result_obj, &"exports".into(), &child_exports)?;
+				js_sys::Reflect::set(&result_obj, &"default_name".into(), &default_name.into())?;
+				js_sys::Reflect::set(&result_obj, &"namespace_name".into(), &namespace_name.into())?;
+				let js_named = js_sys::Array::new();
+				for (local, exported) in named {
+					let pair = js_sys::Array::new();
+					pair.push(&JsValue::from_str(&local));
+					pair.push(&JsValue::from_str(&exported));
+					js_named.push(&pair);
+				}
+				js_sys::Reflect::set(&result_obj, &"named".into(), &js_named)?;
+				Ok(result_obj.into())
+			};
+			promises.push(&wasm_bindgen_futures::future_to_promise(fut));
 			continue;
 		}
 
