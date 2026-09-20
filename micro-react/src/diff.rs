@@ -3,6 +3,7 @@
 //! `diff_children()`, `rerender_component()`.
 
 use js_sys::{Array, Function, Object, Reflect};
+use std::borrow::Cow;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, prelude::*};
 use web_sys::{Document, Element, Node, Text};
@@ -912,6 +913,45 @@ const fn vnode_ref(vnode: &VNode) -> Option<&NodeRef> {
 
 const BLOCKED_ATTRS: &[&str] = &["srcdoc"];
 const URL_ATTRS: &[&str] = &["href", "src", "action", "formaction", "poster", "data", "cite"];
+
+thread_local! {
+	/// Path segments (no slashes) that, when they're the first segment of a
+	/// root-relative URL_ATTRS value, mean "this really lives under
+	/// /public". Empty by default — a plain, unconfigured app sees no
+	/// rewriting at all. Set once at boot via `setPublicPrefixes`, mirroring
+	/// exactly what a Vite dev/build serves from `public/` at the site root
+	/// (e.g. `public/assets/x.png` written in source as `/assets/x.png`),
+	/// for apps that are also served by a plain static file server with no
+	/// such rewrite.
+	static PUBLIC_PREFIXES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Configures which root-relative first path segments (e.g. `"assets"`)
+/// get re-rooted under `/public` by [`resolve_public_path`]. Called once
+/// from JS at boot — see `setPublicPrefixes` in `bindings.rs`. An app that
+/// never calls it sees no rewriting at all.
+pub fn set_public_prefixes(prefixes: Vec<String>) {
+	PUBLIC_PREFIXES.with(|cell| *cell.borrow_mut() = prefixes);
+}
+
+/// Re-roots `value` under `/public` if its first path segment matches a
+/// configured public prefix and it isn't already under `/public`. A no-op
+/// (returns `value` unchanged, no allocation beyond the same string) unless
+/// `setPublicPrefixes` was called with a matching prefix.
+fn resolve_public_path(value: &str) -> Cow<'_, str> {
+	if value.starts_with("/public/") {
+		return Cow::Borrowed(value);
+	}
+	let matches = PUBLIC_PREFIXES.with(|prefixes| {
+		prefixes.borrow().iter().any(|p| {
+			value.len() > p.len() + 1
+				&& value.as_bytes().first() == Some(&b'/')
+				&& value[1..].starts_with(p.as_str())
+				&& value.as_bytes().get(1 + p.len()) == Some(&b'/')
+		})
+	});
+	if matches { Cow::Owned(format!("/public{value}")) } else { Cow::Borrowed(value) }
+}
 const BOOL_ATTRS: &[&str] = &[
 	// NOTE: "checked" is intentionally excluded here; it's handled below via
 	// input.set_checked() so the live DOM property stays in sync on re-renders.
@@ -1022,7 +1062,7 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 
 	// URL attrs — sanitise
 	if URL_ATTRS.contains(&key) {
-		let s = prop_str(value);
+		let s = resolve_public_path(&prop_str(value)).into_owned();
 		let safe = if is_safe_url(&s) { s } else { "#".to_string() };
 		dom.set_attribute(key, &safe)?;
 		return Ok(());
@@ -1248,6 +1288,26 @@ fn document() -> Document {
 #[cfg(test)]
 mod helper_tests {
 	use super::*;
+
+	#[test]
+	fn resolve_public_path_is_noop_when_unconfigured() {
+		PUBLIC_PREFIXES.with(|cell| cell.borrow_mut().clear());
+		assert_eq!(resolve_public_path("/assets/x.png"), "/assets/x.png");
+	}
+
+	#[test]
+	fn resolve_public_path_rewrites_configured_prefixes() {
+		set_public_prefixes(vec!["assets".to_string(), "wasm".to_string()]);
+		assert_eq!(resolve_public_path("/assets/dice_1.png"), "/public/assets/dice_1.png");
+		assert_eq!(resolve_public_path("/wasm/wasm.js"), "/public/wasm/wasm.js");
+		// Unconfigured prefix, and an already-/public path, pass through unchanged.
+		assert_eq!(resolve_public_path("/resources/demo.mp4"), "/resources/demo.mp4");
+		assert_eq!(resolve_public_path("/public/assets/x.png"), "/public/assets/x.png");
+		// Route paths and unrelated absolute URLs are untouched.
+		assert_eq!(resolve_public_path("/dice"), "/dice");
+		assert_eq!(resolve_public_path("https://example.com/assets/x.png"), "https://example.com/assets/x.png");
+		set_public_prefixes(Vec::new());
+	}
 
 	#[test]
 	fn camel_to_kebab_basic() {

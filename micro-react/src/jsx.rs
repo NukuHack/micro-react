@@ -422,6 +422,16 @@ pub async fn load_jsx_module(url: &str, base_url: Option<String>) -> Result<JsVa
 	load_jsx_module_impl(url, base_url, Vec::new()).await
 }
 
+/// What `crate::module_prep::rewrite_dynamic_imports` rewrites a relative
+/// dynamic `import('./x.jsx')` into. Not meant to be called directly —
+/// exported only so it exists as a global once `Object.assign(window,
+/// MicroReact, ...)` runs, since the rewritten call is bare/unqualified
+/// code running inside the same global scope every other module body does.
+#[wasm_bindgen(js_name = "__mrDynImport")]
+pub async fn dyn_import(base_url: String, specifier: &str) -> Result<JsValue, JsValue> {
+	load_jsx_module_impl(specifier, Some(base_url), Vec::new()).await
+}
+
 /// Waits for a module that's already loading elsewhere (a concurrent,
 /// non-circular "diamond" import — e.g. two sibling modules resolved in
 /// parallel by the same `Promise.all` both importing the same dependency)
@@ -671,8 +681,13 @@ async fn load_module_body(
 		}
 	}
 
-	// 6. Transpile JSX syntax into html`...` calls
+	// 6. Transpile JSX syntax into html`...` calls, then rewrite any
+	// relative dynamic `import('./x.jsx')` left in the body (e.g. from
+	// `lazy(() => import('./pages/Foo.jsx'))`) to resolve against this
+	// module's own URL — see `rewrite_dynamic_imports` for why that's not
+	// what the browser does on its own here.
 	let js_code = transpile_jsx_str(&code).map_err(|e| JsValue::from_str(&e.to_string()))?;
+	let js_code = crate::module_prep::rewrite_dynamic_imports(&js_code, absolute_url);
 
 	// 7. Map arguments and execute via the AsyncFunction constructor, so the
 	// module body can use top-level `await`.

@@ -20,6 +20,86 @@ fn is_ident_char(c: char) -> bool {
 	c.is_alphanumeric() || c == '_' || c == '$'
 }
 
+/// Rewrites a *relative* dynamic `import('./x.jsx')` / `import("../x.jsx")`
+/// call into `__mrDynImport("<base_url>", './x.jsx')`, so it resolves
+/// against the module's own real URL instead of whatever script the
+/// browser considers "currently running" — see `jsx.rs` for why that's
+/// not the same thing once the code is executing inside the
+/// `AsyncFunction` module bodies are run through.
+///
+/// Deliberately narrow: only a dynamic import whose *literal* specifier
+/// starts with `./` or `../` is rewritten. That's exactly (and only) the
+/// case that's actually broken — a real bundler (Vite, webpack) resolves
+/// those against the file that wrote them, which is also what `__mrDynImport`
+/// now does. A dynamic import of an absolute URL, or of a variable
+/// (`import(someUrl)`, e.g. loading a third-party module from a CDN) already
+/// works fine as a native `import()` and is left completely alone.
+#[must_use]
+pub fn rewrite_dynamic_imports(source: &str, base_url: &str) -> String {
+	let chars: Vec<char> = source.chars().collect();
+	let total = chars.len();
+	let mut out = String::with_capacity(source.len());
+	let mut cursor = 0;
+
+	while cursor < total {
+		let starts_here = chars[cursor..].starts_with(&['i', 'm', 'p', 'o', 'r', 't']);
+		let preceded_by_ident = cursor > 0 && is_ident_char(chars[cursor - 1]);
+		if !starts_here || preceded_by_ident {
+			out.push(chars[cursor]);
+			cursor += 1;
+			continue;
+		}
+
+		let mut after = cursor + 6;
+		while after < total && chars[after].is_whitespace() {
+			after += 1;
+		}
+		let is_call = chars.get(after) == Some(&'(');
+		if !is_call {
+			out.push(chars[cursor]);
+			cursor += 1;
+			continue;
+		}
+
+		let mut arg_start = after + 1;
+		while arg_start < total && chars[arg_start].is_whitespace() {
+			arg_start += 1;
+		}
+		let quote = chars.get(arg_start).copied();
+		let is_relative = matches!(quote, Some('\'' | '"'))
+			&& (chars[arg_start + 1..].starts_with(&['.', '/']) || chars[arg_start + 1..].starts_with(&['.', '.', '/']));
+
+		if !is_relative {
+			out.push(chars[cursor]);
+			cursor += 1;
+			continue;
+		}
+
+		out.push_str("__mrDynImport(");
+		out.push('"');
+		out.push_str(&escape_js_string(base_url));
+		out.push('"');
+		out.push_str(", ");
+		cursor = after + 1; // resume right after the "(" — the original specifier argument follows untouched
+	}
+
+	out
+}
+
+fn escape_js_string(s: &str) -> String {
+	let mut out = String::with_capacity(s.len());
+	for c in s.chars() {
+		match c {
+			'\\' => out.push_str("\\\\"),
+			'"' => out.push_str("\\\""),
+			'\n' => out.push_str("\\n"),
+			'\r' => out.push_str("\\r"),
+			_ => out.push(c),
+		}
+	}
+	out
+}
+
 /// Matches a single `import {a, b} from '...'`, `import def from '...'`, or
 /// bare `import '...'` line in full (leading/trailing whitespace and an
 /// optional trailing `;` allowed, nothing else), returning its specifier if
@@ -425,6 +505,37 @@ mod tests {
 	#[test]
 	fn bare_import_rejects_trailing_garbage() {
 		assert!(parse_import_line("import './x.css' extra").is_none());
+	}
+
+	#[test]
+	fn rewrites_relative_dynamic_import_single_quote() {
+		let out = rewrite_dynamic_imports("const P = lazy(() => import('./pages/Dice.jsx'));", "https://x/src/App.jsx");
+		assert_eq!(out, "const P = lazy(() => __mrDynImport(\"https://x/src/App.jsx\", './pages/Dice.jsx'));");
+	}
+
+	#[test]
+	fn rewrites_relative_dynamic_import_double_quote_and_dotdot() {
+		let out = rewrite_dynamic_imports(r#"import("../x.jsx")"#, "https://x/y");
+		assert_eq!(out, r#"__mrDynImport("https://x/y", "../x.jsx")"#);
+	}
+
+	#[test]
+	fn leaves_absolute_and_variable_dynamic_imports_alone() {
+		assert_eq!(rewrite_dynamic_imports("import(url)", "b"), "import(url)");
+		assert_eq!(rewrite_dynamic_imports("import('https://cdn.example.com/x.js')", "b"), "import('https://cdn.example.com/x.js')");
+	}
+
+	#[test]
+	fn leaves_import_meta_and_lookalike_identifiers_alone() {
+		assert_eq!(rewrite_dynamic_imports("import.meta.url", "b"), "import.meta.url");
+		assert_eq!(rewrite_dynamic_imports("const reimport = 1;", "b"), "const reimport = 1;");
+		assert_eq!(rewrite_dynamic_imports("importantValue(x)", "b"), "importantValue(x)");
+	}
+
+	#[test]
+	fn escapes_quotes_and_backslashes_in_base_url() {
+		let out = rewrite_dynamic_imports("import('./a.jsx')", "https://x/\"y\\z");
+		assert_eq!(out, r#"__mrDynImport("https://x/\"y\\z", './a.jsx')"#);
 	}
 
 	#[test]

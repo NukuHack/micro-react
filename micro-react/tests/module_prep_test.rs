@@ -60,7 +60,7 @@ mod tests {
 
 	#[test]
 	fn strips_mixed_default_and_namespace_import() {
-		let (code, specifiers) = prepare_module_str("import React, * as ns from 'react';");
+		let (code, specifiers) = prepare_module_str("import React, * as ns from 'apple';");
 		assert_eq!(code, "");
 		assert_eq!(specifiers.len(), 1);
 		assert_eq!(specifiers[0].default_name, Some("React".to_string()));
@@ -70,7 +70,7 @@ mod tests {
 
 	#[test]
 	fn strips_mixed_default_and_named_rename_import() {
-		let (code, specifiers) = prepare_module_str("import React, { useState as useMyState } from 'react';");
+		let (code, specifiers) = prepare_module_str("import React, { useState as useMyState } from 'apple';");
 		assert_eq!(code, "");
 		assert_eq!(specifiers.len(), 1);
 		assert_eq!(specifiers[0].default_name, Some("React".to_string()));

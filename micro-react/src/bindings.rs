@@ -867,6 +867,59 @@ fn js_create_suspense_inner(props: &JsValue) -> JsValue {
 	Reflect::get(props, &"children".into()).unwrap_or(JsValue::NULL)
 }
 
+/// Configures the `/public` path-prefix rewrite (see `diff::resolve_public_path`):
+/// for an app whose `src/` writes root-relative asset paths the way Vite's
+/// dev server expects (e.g. `/assets/x.png`, really `public/assets/x.png`
+/// on disk) but which is *also* served by a plain static file server with
+/// no such rewrite, this makes `src`/`href`/`poster`/etc. on any element
+/// re-root a matching path under `/public` transparently. Call once at
+/// boot with the top-level folder names under `public/` that appear this
+/// way in source, e.g. `setPublicPrefixes(["assets", "resources", "wasm"])`.
+/// Unconfigured (or called with an empty list), nothing is rewritten.
+#[wasm_bindgen(js_name = setPublicPrefixes)]
+pub fn js_set_public_prefixes(prefixes: &Array) {
+	let list = prefixes.iter().filter_map(|v| v.as_string()).collect();
+	crate::diff::set_public_prefixes(list);
+}
+
+// React-style `lazy()`, layered on the existing Suspense support: a
+// component "suspends" by throwing a pending promise (a thenable), which
+// Suspense catches the same way it catches a thrown error and retries once
+// it settles. Written in raw JS (not exposed as its own wasm_bindgen export)
+// because it's a plain higher-order function factory with closure state —
+// no different in kind from `ASYNC_FUNCTION_CTOR` above, just returned
+// instead of stored.
+fn js_create_lazy() -> JsValue {
+	let getter = Function::new_no_args(
+		"return function lazy(loader) {\n\
+		\tlet status = 'pending'; // 'pending' | 'success' | 'error'\n\
+		\tlet payload;            // resolved component, or the caught error\n\
+		\tlet promise;            // memoized so loader() only ever runs once\n\
+		\treturn function Lazy(props) {\n\
+		\t\tif (status === 'success') return createElement(payload, props);\n\
+		\t\tif (status === 'error') throw payload;\n\
+		\t\tif (!promise) {\n\
+		\t\t\tpromise = Promise.resolve(loader()).then(\n\
+		\t\t\t\t(mod) => { status = 'success'; payload = (mod && mod.default) ? mod.default : mod; },\n\
+		\t\t\t\t(err) => { status = 'error'; payload = err; },\n\
+		\t\t\t);\n\
+		\t\t}\n\
+		\t\tthrow promise; // Suspense sees this is a thenable: render fallback, retry on settle\n\
+		\t};\n\
+		};",
+	);
+	Reflect::apply(&getter, &JsValue::UNDEFINED, &Array::new()).unwrap_or(JsValue::UNDEFINED)
+}
+
+// react-router-dom's `BrowserRouter` just supplies history context to
+// `Routes`; the router this runtime uses already reads window.location/
+// history directly, so this stand-in only needs to exist and render its
+// children.
+fn js_create_browser_router() -> JsValue {
+	let getter = Function::new_no_args("return function BrowserRouter(props) { return props.children; };");
+	Reflect::apply(&getter, &JsValue::UNDEFINED, &Array::new()).unwrap_or(JsValue::UNDEFINED)
+}
+
 // ─── Boot convenience: bundle the non-standard exports ───
 
 /// Bundles the values that aren't plain `wasm-bindgen` exports (`Fragment`
@@ -881,6 +934,8 @@ pub fn js_create_extras() -> Result<JsValue, JsValue> {
 	Reflect::set(&obj, &"Fragment".into(), &get_fragment())?;
 	Reflect::set(&obj, &"ErrorBoundary".into(), &js_create_error_boundary())?;
 	Reflect::set(&obj, &"Suspense".into(), &js_create_suspense())?;
+	Reflect::set(&obj, &"lazy".into(), &js_create_lazy())?;
+	Reflect::set(&obj, &"BrowserRouter".into(), &js_create_browser_router())?;
 	Ok(obj.into())
 }
 

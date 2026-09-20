@@ -18,125 +18,100 @@ if (sessionStorage.redirect) {
 </script>
 
 <script type="module">
-// Boot WASM (needed so the module is genuinely loaded/used)
-window.MicroReact = await import('./micro-react/pkg/micro_react.js')
-  .then(async (m) => { await m.default(); return m; });
+  // Boot WASM
+  window.MicroReact = await import('./micro-react/pkg/micro_react.js')
+    .then(async (m) => { await m.default(); return m; });
+
+  // Everything below this line is the only project-specific bit left:
+  // src/**/*.jsx writes root-relative asset paths the way Vite serves
+  // `public/` at the site root. A plain static server doesn't do that
+  // rewrite, so tell micro-react which are the top-level public/ folders
+  MicroReact.setPublicPrefixes(["assets", "resources", "wasm"]);
 
   // html is a wrapper: tagged templates call (strings, ...values), the
   // wasm export needs (strings, valuesArray) — no way to avoid this one.
   window.html = (txt, ...val) => MicroReact.htmlTemplate(txt, val);
 
-  // ─── lazy() — React-style lazy loading on top of the existing Suspense ───
-  // A component "suspends" by throwing a pending promise (a thenable); Suspense
-  // catches that (same path as a thrown error) and retries once it settles.
-  // This needs no WASM changes — it's the same trick memo()/forwardRef() use.
-  window.lazy = function lazy(loader) {
-    let status = 'pending';   // 'pending' | 'success' | 'error'
-    let payload;              // resolved component, or the caught error
-    let promise;               // memoized so we only call loader() once
-
-    return function Lazy(props) {
-      if (status === 'success') return createElement(payload, props);
-      if (status === 'error') throw payload;
-
-      if (!promise) {
-        promise = Promise.resolve(loader()).then(
-          (mod) => { status = 'success'; payload = (mod && mod.default) ? mod.default : mod; },
-          (err) => { status = 'error'; payload = err; },
-        );
-      }
-      throw promise; // Suspense sees this is a thenable -> renders fallback, retries on settle
-    };
-  };
-
-  // react-router-dom's BrowserRouter just supplies history context to Routes —
-  // this Router already reads window.location/history directly, so BrowserRouter
-  // only needs to exist and render its children.
-  window.BrowserRouter = function BrowserRouter(props) {
-    return props.children;
-  };
-
-// make everything Global
-Object.assign(window, MicroReact, MicroReact.createExtras());
+  // make everything Global from wasm
+  Object.assign(window, MicroReact, MicroReact.createExtras());
 
 
+  // ─── NAV ───
+  function Nav() {
+    return html`
+      <nav>
+        <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
+        <${NavLink} to="/" class="nav-link">🏠 Home</${NavLink}>
+        <${NavLink} to="/about" class="nav-link">📖 About</${NavLink}>
+        <${NavLink} to="/hello" class="nav-link">👋 Hello</${NavLink}>
+      </nav>
+    `;
+  }
 
-// ─── NAV ───
-function Nav() {
-  return html`
-    <nav>
-      <div class="nav-brand"><span style="font-size:1.2rem">⚛</span>micro<span>-react</span></div>
-      <${NavLink} to="/" class="nav-link">🏠 Home</${NavLink}>
-      <${NavLink} to="/about" class="nav-link">📖 About</${NavLink}>
-      <${NavLink} to="/hello" class="nav-link">👋 Hello</${NavLink}>
-    </nav>
-  `;
-}
+  // ─── SHELL ───
+  function Shell() {
+    const {theme, setTheme} = useContext(ThemeCtx);
+    
+    return html`
+      <${Fragment}>
+        <${Nav} />
+        <${Outlet} context=${{ThemeCtx}}/>
+        <div style="position:fixed;bottom:1.25rem;right:1.25rem;display:flex;gap:.4rem;z-index:999;background:var(--surface);border:1px solid var(--border);padding:.4rem;border-radius:10px">
+          ${themes.map((t, i) => html`
+            <button key="${t.name}" class="btn-ghost btn-sm${theme.idx === i ? ' btn-primary' : ''}" onclick="${() => setTheme(i)}" title="${t.label}">${t.label.split(' ')[0]}</button>
+          `)}
+        </div>
+      </${Fragment}>
+    `;
+  }
 
-// ─── SHELL ───
-function Shell() {
-  const {theme, setTheme} = useContext(ThemeCtx);
-  
-  return html`
-    <${Fragment}>
-      <${Nav} />
-      <${Outlet} context=${{ThemeCtx}}/>
-      <div style="position:fixed;bottom:1.25rem;right:1.25rem;display:flex;gap:.4rem;z-index:999;background:var(--surface);border:1px solid var(--border);padding:.4rem;border-radius:10px">
-        ${themes.map((t, i) => html`
-          <button key="${t.name}" class="btn-ghost btn-sm${theme.idx === i ? ' btn-primary' : ''}" onclick="${() => setTheme(i)}" title="${t.label}">${t.label.split(' ')[0]}</button>
-        `)}
-      </div>
-    </${Fragment}>
-  `;
-}
+  // ─── THEME CONTEXT ───
+  const themes = [
+    { name: 'dark',  label: '🌑 Dark', idx: 0  },
+    { name: 'light', label: '☀️ Light', idx: 1 },
+    { name: 'neon',  label: '🟩 Neon', idx: 2  },
+  ];
+  const ThemeCtx = createContext();
 
-// ─── THEME CONTEXT ───
-const themes = [
-  { name: 'dark',  label: '🌑 Dark', idx: 0  },
-  { name: 'light', label: '☀️ Light', idx: 1 },
-  { name: 'neon',  label: '🟩 Neon', idx: 2  },
-];
-const ThemeCtx = createContext();
+  // ─── APP ROOT  (provides theme context + router) ───
+  function App() {
+    const [theme, _setTheme] = useState(themes[0]);
+    const setTheme = (inp) => _setTheme(themes[inp % themes.length]);
 
-// ─── APP ROOT  (provides theme context + router) ───
-function App() {
-  const [theme, _setTheme] = useState(themes[0]);
-  const setTheme = (inp) => _setTheme(themes[inp % themes.length]);
+    let OldJs = html`<${Router} routes="${{
+      '/':      () => html`<${Shell} Page=${HomePage} />`,
+      '/about': () => html`<${Shell} Page=${AboutPage} />`,
+      '/hello': () => html`<${Shell} Page=${HelloPage} />`,
+      '*': () => html`<${Shell} Page=${NotFound} />`,
+    }}" />`;
 
-  let OldJs = html`<${Router} routes="${{
-    '/':      () => html`<${Shell} Page=${HomePage} />`,
-    '/about': () => html`<${Shell} Page=${AboutPage} />`,
-    '/hello': () => html`<${Shell} Page=${HelloPage} />`,
-    '*': () => html`<${Shell} Page=${NotFound} />`,
-  }}" />`;
+    let NewJsx = html`
+    <${Routes}>
+      <${Route} path="/" element=${html`<${Shell} />`}>
+        <${Route} index element=${html`<${HomePage} />`} />
+        <${Route} path="/about" element=${html`<${AboutPage} />`} />
+        <${Route} path="/hello" element=${html`<${HelloPage} />`} />
+        <${Route} path="*" element=${html`<${NotFound} />`} />
+      </${Route}>
+    </${Routes}>`;
 
-  let NewJsx = html`
-  <${Routes}>
-    <${Route} path="/" element=${html`<${Shell} />`}>
-      <${Route} index element=${html`<${HomePage} />`} />
-      <${Route} path="/about" element=${html`<${AboutPage} />`} />
-      <${Route} path="/hello" element=${html`<${HelloPage} />`} />
-      <${Route} path="*" element=${html`<${NotFound} />`} />
-    </${Route}>
-  </${Routes}>`;
+    return html`
+      <${ThemeCtx.Provider} value=${{theme, setTheme}} >
+        ${NewJsx}
+      </${ThemeCtx.Provider}>
+    `;
+  }
 
-  return html`
-    <${ThemeCtx.Provider} value=${{theme, setTheme}} >
-      ${NewJsx}
-    </${ThemeCtx.Provider}>
-  `;
-}
+  // ─── JSX LOADER ───
+  const [
+    { default: HomePage }, { default: HelloPage },
+    { default: NotFound }, { default: AboutPage }
+  ] = await Promise.all([
+    loadJsx('./home.jsx'), loadJsx('./hello.jsx'),
+    loadJsx('./404.jsx'), loadJsx('./about.jsx')
+  ]);
 
-// ─── JSX LOADER DEMO ───
-const [
-  { default: HomePage }, { default: HelloPage },
-  { default: NotFound }, { default: AboutPage }
-] = await Promise.all([
-  loadJsx('./home.jsx'), loadJsx('./hello.jsx'),
-  loadJsx('./404.jsx'), loadJsx('./about.jsx')
-]);
-
-window.__root = await render(html`<${App} />`, document.getElementById('root'));
+  window.__root = await render(html`<${App} />`, document.getElementById('root'));
 </script>
 
 </body>
