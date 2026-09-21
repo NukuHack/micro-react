@@ -427,6 +427,35 @@ pub fn js_use_effect(callback: &Function, deps: &JsValue) {
 	);
 }
 
+/// `useStylesheet(url)` — ties a stylesheet's `<link>` to *this component
+/// instance's* mount/unmount, instead of to module-load time the way a bare
+/// `import './x.css'` does. Call it from inside a page/component body (not
+/// at module top level) so CSS that should only apply while that component
+/// is on screen — e.g. a page's own styles — gets removed the moment the
+/// component unmounts, rather than lingering in `<head>` and leaking onto
+/// whatever renders next (shared header/navbar/footer included). Several
+/// mounted instances (or a hook use alongside an unrelated bare import) can
+/// share the same href safely — it's ref-counted, so the `<link>` only
+/// actually leaves the document once nothing mounted still wants it.
+/// Re-runs (releasing the old href, retaining the new one) if `url` changes
+/// between renders, same as any other effect keyed on its input.
+#[wasm_bindgen(js_name = useStylesheet)]
+pub fn js_use_stylesheet(url: &str, base_url: Option<String>) {
+	let dep = DepVal(url.to_string());
+	let url = url.to_string();
+	crate::hooks::use_effect(
+		move || {
+			let href = crate::jsx::retain_stylesheet_js(&url, base_url).ok();
+			Box::new(move || {
+				if let Some(href) = href {
+					let _ = crate::jsx::release_stylesheet_js(&href);
+				}
+			}) as Box<dyn FnOnce()>
+		},
+		Some(vec![dep]),
+	);
+}
+
 /// `useLayoutEffect(callback, deps?)` — fires synchronously after DOM updates.
 #[wasm_bindgen(js_name = useLayoutEffect)]
 pub fn js_use_layout_effect(callback: &Function, deps: &JsValue) {

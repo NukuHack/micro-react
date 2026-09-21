@@ -1,5 +1,7 @@
 use wasm_bindgen::prelude::*;
 
+use crate::scan::{skip_js_comment, skip_js_regex, skip_js_string};
+
 /// One `import ... from '...'` line found in the source, with its specifier
 /// shape preserved so a caller can resolve `from` against whatever modules
 /// it already has on hand.
@@ -395,6 +397,185 @@ fn collapse_multiline_imports(source: &str) -> String {
 	out.join("\n")
 }
 
+/// True if specifier `from` (ignoring a `?query` or `#hash` suffix) names a
+/// `.css` file. Mirrors `jsx::is_css_url`'s check, but works on the raw
+/// specifier text — this runs before anything resolves it to a URL.
+fn is_css_specifier(from: &str) -> bool {
+	let path = from.split(['?', '#']).next().unwrap_or(from);
+	path.rsplit('/').next().unwrap_or("").to_ascii_lowercase().ends_with(".css")
+}
+
+/// Finds the index of the `)` matching the `(` at `open`, skipping over JS
+/// strings/template literals/comments/regex literals the way
+/// `scan::find_matching_brace` does for `{`/`}` — needed to jump over a
+/// function's parameter list (which may itself contain nested parens, e.g.
+/// default values) to find the `{` that starts its body.
+fn find_matching_paren(chars: &[char], open: usize) -> Option<usize> {
+	debug_assert_eq!(chars.get(open), Some(&'('));
+	let n = chars.len();
+	let mut depth = 0usize;
+	let mut i = open;
+	while i < n {
+		if let Some(next) = skip_js_comment(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_regex(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_string(chars, i) {
+			i = next;
+			continue;
+		}
+		match chars[i] {
+			'(' => depth += 1,
+			')' => {
+				depth -= 1;
+				if depth == 0 {
+					return Some(i);
+				}
+			}
+			_ => {}
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Finds the next whole-word (not a substring of a longer identifier)
+/// occurrence of `word` at or after `from`, skipping over JS strings,
+/// comments, and regex literals so a stray match inside one of those can't
+/// be mistaken for real source.
+fn find_word(chars: &[char], from: usize, word: &str) -> Option<usize> {
+	let wchars: Vec<char> = word.chars().collect();
+	let wlen = wchars.len();
+	let n = chars.len();
+	let mut i = from;
+	while i + wlen <= n {
+		if let Some(next) = skip_js_comment(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_regex(chars, i) {
+			i = next;
+			continue;
+		}
+		if let Some(next) = skip_js_string(chars, i) {
+			i = next;
+			continue;
+		}
+		let before_ok = i == 0 || !is_ident_char(chars[i - 1]);
+		let after_ok = !chars.get(i + wlen).is_some_and(|&c| is_ident_char(c));
+		if before_ok && after_ok && chars[i..i + wlen] == wchars[..] {
+			return Some(i);
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Locates the body of the module's default-exported component — the
+/// natural "owner" of a bare `import './x.css'` written at the top of that
+/// file — and returns the char index of its opening `{`, so a caller can
+/// splice a statement in right after it. Runs on `code` *before* any
+/// export/JSX rewriting, i.e. on source that still reads exactly like the
+/// plain `.jsx` file on disk.
+///
+/// Recognizes exactly the two shapes that cover essentially every
+/// real-world functional component:
+///   - `export default function Name(...) { ... }` (inline, name optional)
+///   - `function Name(...) { ... }` declared anywhere earlier in the file,
+///     together with a later `export default Name;`
+///
+/// Anything else — an arrow function assigned to a `const` and re-exported
+/// by name, an anonymous default arrow/function expression, a class, a
+/// bare value — returns `None`. There's no component body to scope the
+/// stylesheet to, so the caller falls back to the old, unscoped,
+/// load-once-forever behavior for that file's CSS imports rather than
+/// guessing at one.
+fn find_default_component_body_start(chars: &[char]) -> Option<usize> {
+	let export_at = find_word(chars, 0, "export")?;
+	let default_at = find_word(chars, export_at, "default")?;
+	// Only whitespace may separate "export" and "default" — otherwise this
+	// wasn't the `default_at` this particular `export` actually introduces
+	// (e.g. `export const x = 1; ... export default y;` — a second,
+	// unrelated `export` sits between them).
+	if chars[export_at + 6..default_at].iter().any(|c| !c.is_whitespace()) {
+		return None;
+	}
+
+	let mut i = default_at + 7;
+	while i < chars.len() && chars[i].is_whitespace() {
+		i += 1;
+	}
+
+	// Case A: `export default function [Name](...) { ... }`
+	if chars[i..].starts_with(&['f', 'u', 'n', 'c', 't', 'i', 'o', 'n']) && !chars.get(i + 8).is_some_and(|&c| is_ident_char(c)) {
+		let mut j = i + 8;
+		while j < chars.len() && (chars[j].is_whitespace() || is_ident_char(chars[j])) {
+			j += 1;
+		}
+		if chars.get(j) == Some(&'(') {
+			let close_paren = find_matching_paren(chars, j)?;
+			let mut k = close_paren + 1;
+			while k < chars.len() && chars[k].is_whitespace() {
+				k += 1;
+			}
+			if chars.get(k) == Some(&'{') {
+				return Some(k);
+			}
+		}
+		return None;
+	}
+
+	// Case B: `export default Name;` — a bare identifier and nothing else
+	// on the statement — referencing an earlier `function Name(...) {}`.
+	let name_start = i;
+	let name_len = chars[i..].iter().take_while(|&&c| is_ident_char(c)).count();
+	if name_len == 0 {
+		return None;
+	}
+	let name_end = name_start + name_len;
+	let mut trailing = name_end;
+	while trailing < chars.len() && chars[trailing].is_whitespace() {
+		trailing += 1;
+	}
+	if !matches!(chars.get(trailing), None | Some(';')) {
+		return None;
+	}
+	let name: Vec<char> = chars[name_start..name_end].to_vec();
+
+	let mut search_from = 0;
+	loop {
+		let fn_at = find_word(chars, search_from, "function")?;
+		search_from = fn_at + 8;
+		let mut j = fn_at + 8;
+		while j < chars.len() && chars[j].is_whitespace() {
+			j += 1;
+		}
+		let matches_name = chars[j..].starts_with(name.as_slice()) && !chars.get(j + name.len()).is_some_and(|&c| is_ident_char(c));
+		if !matches_name {
+			continue;
+		}
+		let mut k = j + name.len();
+		while k < chars.len() && chars[k].is_whitespace() {
+			k += 1;
+		}
+		if chars.get(k) != Some(&'(') {
+			continue;
+		}
+		let Some(close_paren) = find_matching_paren(chars, k) else { continue };
+		let mut m = close_paren + 1;
+		while m < chars.len() && chars[m].is_whitespace() {
+			m += 1;
+		}
+		if chars.get(m) == Some(&'{') {
+			return Some(m);
+		}
+	}
+}
+
 #[must_use]
 pub fn extract_imports(source: &str) -> (String, Vec<ImportSpecifier>) {
 	let source = collapse_multiline_imports(source);
@@ -585,7 +766,50 @@ pub fn rewrite_exports_str(source: &str) -> String {
 
 #[must_use]
 pub fn prepare_module_str(source: &str) -> (String, Vec<ImportSpecifier>) {
-	let (code, specifiers) = extract_imports(source);
+	let (code, mut specifiers) = extract_imports(source);
+
+	// A bare `import './x.css'` is a plain, ordinary React/Vite-compatible
+	// side-effect import in the *source* — nothing about the .jsx file
+	// itself changes. Right here, at "compile" time, is where it becomes
+	// scoped: rewritten into a `useStylesheet(...)` call spliced into the
+	// body of whatever component this module default-exports, so the
+	// stylesheet's `<link>` is tied to *that component instance's*
+	// mount/unmount (see `bindings::js_use_stylesheet`) instead of living
+	// forever from the moment the module first loads. If no component body
+	// can be found (see `find_default_component_body_start`), the import is
+	// left exactly as before — a permanent, load-once `<link>` — rather than
+	// guessing at a scope for it.
+	let bare_css_idxs: Vec<usize> = specifiers
+		.iter()
+		.enumerate()
+		.filter(|(_, s)| s.default_name.is_none() && s.namespace_name.is_none() && s.named.is_empty() && is_css_specifier(&s.from))
+		.map(|(i, _)| i)
+		.collect();
+
+	let code = if bare_css_idxs.is_empty() {
+		code
+	} else {
+		let chars: Vec<char> = code.chars().collect();
+		match find_default_component_body_start(&chars) {
+			Some(body_start) => {
+				let mut injected = String::new();
+				for &idx in &bare_css_idxs {
+					let escaped = escape_js_string(&specifiers[idx].from);
+					injected.push_str(&format!("\nuseStylesheet(\"{escaped}\", import.meta.url);"));
+				}
+
+				specifiers = specifiers.into_iter().enumerate().filter(|(i, _)| !bare_css_idxs.contains(i)).map(|(_, s)| s).collect();
+
+				let mut out = String::with_capacity(code.len() + injected.len());
+				out.extend(&chars[..=body_start]);
+				out.push_str(&injected);
+				out.extend(&chars[body_start + 1..]);
+				out
+			}
+			None => code,
+		}
+	};
+
 	(rewrite_exports_str(&code), specifiers)
 }
 
@@ -638,6 +862,49 @@ mod tests {
 		assert!(spec.default_name.is_none());
 		assert!(spec.namespace_name.is_none());
 		assert!(spec.named.is_empty());
+	}
+
+	#[test]
+	fn scopes_bare_css_import_to_inline_default_export_function() {
+		let src = "import './styles/dice.css';\n\nexport default function Dice() {\n  return null;\n}\n";
+		let (code, specifiers) = prepare_module_str(src);
+		// The stylesheet is no longer a dependency the runtime loader needs
+		// to (permanently) resolve — the injected call now owns it.
+		assert!(specifiers.is_empty());
+		assert!(code.contains("useStylesheet(\"./styles/dice.css\", import.meta.url);"));
+		// And it landed inside the function body, not before it.
+		let fn_pos = code.find("function Dice").expect("function should exist");
+		let call_pos = code.find("useStylesheet(").expect("call should exist");
+		assert!(call_pos > fn_pos);
+	}
+
+	#[test]
+	fn scopes_bare_css_import_to_declared_and_reexported_function() {
+		let src = "import './styles/dice.css';\n\nfunction Dice() {\n  return null;\n}\n\nexport default Dice;\n";
+		let (code, specifiers) = prepare_module_str(src);
+		assert!(specifiers.is_empty());
+		assert!(code.contains("useStylesheet(\"./styles/dice.css\", import.meta.url);"));
+	}
+
+	#[test]
+	fn leaves_css_import_unscoped_when_no_default_component_is_found() {
+		let src = "import './styles/global.css';\n\nexport const helper = () => 1;\n";
+		let (_, specifiers) = prepare_module_str(src);
+		// No component body to scope it to — falls back to the old,
+		// permanent, load-once-forever behavior.
+		assert_eq!(specifiers.len(), 1);
+		assert_eq!(specifiers[0].from, "./styles/global.css");
+	}
+
+	#[test]
+	fn leaves_bound_css_import_untouched() {
+		// `import url from './x.css?url'` wants the URL, not a side effect —
+		// never rewritten into a `useStylesheet` call.
+		let src = "import cssUrl from './styles/dice.css?url';\n\nexport default function Dice() {\n  return cssUrl;\n}\n";
+		let (code, specifiers) = prepare_module_str(src);
+		assert_eq!(specifiers.len(), 1);
+		assert_eq!(specifiers[0].from, "./styles/dice.css?url");
+		assert!(!code.contains("useStylesheet"));
 	}
 
 	#[test]

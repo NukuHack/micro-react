@@ -9,7 +9,7 @@
 //! can rarely be misread as a tag start; see `looks_like_jsx_start`.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
@@ -399,20 +399,34 @@ fn is_json_url(url: &web_sys::Url) -> bool {
 	pathname.rsplit('/').next().unwrap_or("").to_ascii_lowercase().ends_with(".json")
 }
 
+// Ref-counted rather than a plain `HashSet`: a bare `import './x.css'` at
+// module top level is permanent by design (mirrors real bundlers — module
+// side effects run once, ever, and are never "undone" when whatever
+// imported them stops being used). But `useStylesheet` (see below) ties a
+// stylesheet to a *component instance's* mount/unmount lifecycle instead of
+// to module load, and several instances (or a bare import plus a hook use)
+// can independently want the same href alive at once, so plain insert/
+// remove-on-first-release would drop it out from under a sibling that still
+// needs it. The count tracks how many live "owners" (module-load side
+// effects + mounted `useStylesheet` callers) currently want this href's
+// `<link>` in the document; the tag is only removed when it hits zero.
 thread_local! {
-	static INJECTED_STYLESHEETS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+	static STYLESHEET_REFCOUNTS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
-/// Handles a side-effect stylesheet import (`import './styles.css'`) by
-/// injecting a `<link rel="stylesheet">` into `<head>`, instead of trying to
-/// fetch, transpile, and execute the file as JS. Deduplicated by absolute
-/// URL, so importing the same stylesheet from several modules only adds one
-/// `<link>`. Deliberately doesn't wait for the network fetch to finish —
-/// real bundlers (Vite, webpack) don't block JS module evaluation on CSS
-/// loading either, they just guarantee the tag is in the document.
-fn inject_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue> {
-	let already_injected = INJECTED_STYLESHEETS.with(|set| !set.borrow_mut().insert(href.to_string()));
-	if already_injected {
+/// Increments the ref count for `href` and, on the 0 → 1 transition,
+/// injects a `<link rel="stylesheet">` into `<head>`. Deliberately doesn't
+/// wait for the network fetch to finish — real bundlers (Vite, webpack)
+/// don't block JS module evaluation on CSS loading either, they just
+/// guarantee the tag is in the document.
+fn retain_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue> {
+	let was_zero = STYLESHEET_REFCOUNTS.with(|counts| {
+		let mut counts = counts.borrow_mut();
+		let count = counts.entry(href.to_string()).or_insert(0);
+		*count += 1;
+		*count == 1
+	});
+	if !was_zero {
 		return Ok(());
 	}
 
@@ -422,8 +436,65 @@ fn inject_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue
 	let link: web_sys::HtmlLinkElement = document.create_element("link")?.dyn_into()?;
 	link.set_rel("stylesheet");
 	link.set_href(href);
+	link.set_attribute("data-mr-href", href)?;
 	head.append_child(&link)?;
 	Ok(())
+}
+
+/// Decrements the ref count for `href` and, on reaching 0, removes its
+/// `<link>` from `<head>`. A no-op (rather than a panic) if `href` was never
+/// retained or is already at 0, so a defensive double-cleanup is harmless.
+fn release_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValue> {
+	let hit_zero = STYLESHEET_REFCOUNTS.with(|counts| {
+		let mut counts = counts.borrow_mut();
+		match counts.get_mut(href) {
+			Some(count) if *count > 0 => {
+				*count -= 1;
+				if *count == 0 {
+					counts.remove(href);
+					true
+				} else {
+					false
+				}
+			}
+			_ => false,
+		}
+	});
+	if !hit_zero {
+		return Ok(());
+	}
+
+	let document = window.document().ok_or_else(|| JsValue::from_str("No document available"))?;
+	if let Some(head) = document.head() {
+		if let Ok(Some(link)) = head.query_selector(&format!("link[data-mr-href=\"{href}\"]")) {
+			head.remove_child(&link)?;
+		}
+	}
+	Ok(())
+}
+
+/// JS-callable half of `useStylesheet(url)`: resolves `url` against
+/// `base_url` (the importing module's own URL, same as CSS side-effect
+/// imports use) and retains it. Returns the resolved absolute href so the
+/// caller's cleanup can release the *same* string even if `base_url` isn't
+/// available (or has changed) by the time unmount runs.
+#[wasm_bindgen(js_name = "__mrRetainStylesheet")]
+pub fn retain_stylesheet_js(url: &str, base_url: Option<String>) -> Result<String, JsValue> {
+	let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
+	let href = match base_url {
+		Some(base) => web_sys::Url::new_with_base(url, &base)?.href(),
+		None => web_sys::Url::new(url)?.href(),
+	};
+	retain_stylesheet(&window, &href)?;
+	Ok(href)
+}
+
+/// JS-callable half of `useStylesheet`'s cleanup: releases a href
+/// previously returned by `__mrRetainStylesheet`.
+#[wasm_bindgen(js_name = "__mrReleaseStylesheet")]
+pub fn release_stylesheet_js(href: &str) -> Result<(), JsValue> {
+	let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window available"))?;
+	release_stylesheet(&window, href)
 }
 
 /// Recursively loads, transpiles, and executes a JSX module in the browser.
@@ -574,7 +645,7 @@ async fn load_module_body(
 			let is_bare_import = default_name.is_none() && namespace_name.is_none() && named.is_empty();
 			let child_exports = js_sys::Object::new();
 			if is_bare_import {
-				inject_stylesheet(window, &child_url)?;
+				retain_stylesheet(window, &child_url)?;
 			} else {
 				js_sys::Reflect::set(&child_exports, &"default".into(), &JsValue::from_str(&child_url))?;
 			}
