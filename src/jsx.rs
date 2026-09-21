@@ -465,10 +465,10 @@ fn release_stylesheet(window: &web_sys::Window, href: &str) -> Result<(), JsValu
 	}
 
 	let document = window.document().ok_or_else(|| JsValue::from_str("No document available"))?;
-	if let Some(head) = document.head() {
-		if let Ok(Some(link)) = head.query_selector(&format!("link[data-mr-href=\"{href}\"]")) {
-			head.remove_child(&link)?;
-		}
+	if let Some(head) = document.head()
+		&& let Ok(Some(link)) = head.query_selector(&format!("link[data-mr-href=\"{href}\"]"))
+	{
+		head.remove_child(&link)?;
 	}
 	Ok(())
 }

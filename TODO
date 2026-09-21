@@ -4,11 +4,11 @@ read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
 
-none as far as i know
+SVG tag-name casing: html_template.rs's compile_node reads tag names via elem.local_name(), which the browser always lowercases for HTML-parsed elements — so a camelCase SVG tag like <linearGradient> or <clipPath> would silently become <lineargradient> and never get restored (there's a case-map for attribute names, but not tag names). This is a real latent bug in micro-react, but I checked your whole react-project and you don't use any camelCase SVG elements (just <svg>/<path>, already lowercase), so it doesn't actually bite you right now.
 
 ## Test coverage gaps
 
-none as far as i know
+none as far as i know, but it can allways be extended
 
 ## Plans for extension
 

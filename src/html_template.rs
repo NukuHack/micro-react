@@ -660,6 +660,18 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 
 			Some(ChildTemplate::Element(Box::new(ElementTemplate { tag, attrs, key, ref_hole, children })))
 		}
+		// `protect_table_context_holes` re-marks a hole that sits directly
+		// inside a table/tbody/thead/tfoot/tr/colgroup as a comment so it
+		// survives foster parenting instead of being silently relocated.
+		// It only ever wraps a lone hole token (nothing else), so this
+		// mirrors the TEXT_NODE lone-hole case above, not the general
+		// DynamicText/HoleSeq cases — literal text can't meaningfully live
+		// in one of those elements anyway.
+		Node::COMMENT_NODE => {
+			let text = node.text_content().unwrap_or_default();
+			let tt = split_holes(&text);
+			if tt.holes.len() == 1 && tt.literals.iter().all(String::is_empty) { Some(ChildTemplate::Hole(tt.holes[0])) } else { None }
+		}
 		_ => None,
 	}
 }
@@ -730,9 +742,124 @@ fn first_tag_name(html: &str) -> Option<String> {
 	}
 }
 
+/// Elements whose *direct* children must be `tr`/`td`/`th`/`col` (or
+/// nothing) per the HTML5 tree-construction rules. A character token seen
+/// while the current node is one of these — including a hole token, which
+/// is otherwise indistinguishable from ordinary text at parse time — isn't
+/// inserted where it appears; the "foster parenting" algorithm silently
+/// relocates it to just before the nearest `<table>` ancestor instead. See
+/// `protect_table_context_holes` for how this is avoided.
+const TABLE_FOSTER_PARENTS: &[&str] = &["table", "tbody", "thead", "tfoot", "tr", "colgroup"];
+
+/// Rewrites any hole token sitting directly inside a `TABLE_FOSTER_PARENTS`
+/// element — e.g. the row-list hole in `` html`<tbody>${rows}</tbody>` ``
+/// — from bare text into an HTML comment (`<!--MARK...MARK-->`).
+///
+/// `table_context_wrapper` already solves this for a hole at the *root* of
+/// its own template (a `` html`<tr>...` `` call compiled on its own): it
+/// wraps the whole thing in a synthetic `<table><tbody>` so the parser
+/// recognizes `tr` as such instead of dropping it. But a hole can just as
+/// easily sit *inside* a literal, correctly-authored `<table>` that isn't
+/// the template's root — e.g. the outer page template that writes
+/// `<table><tbody>${hole}</tbody></table>` literally, with `${hole}`
+/// standing in for a *separately* compiled per-row template. There the
+/// table ancestry is already genuine and correct, so `table_context_wrapper`
+/// never triggers, yet the hole is still foster-parented: not because
+/// context is missing, but because the parser is now correctly *in* table
+/// insertion mode and foster parenting is exactly what that mode does to
+/// stray non-whitespace text. The result is silent and easy to miss: the
+/// `<tbody>` compiles with no children, and the hole's contents end up
+/// attached one level up, immediately before the `<table>` — so at render
+/// time every row (and everything inside it) mounts as a sibling of the
+/// table instead of inside it, and every CSS rule that depends on real
+/// table ancestry stops matching.
+///
+/// Comments aren't subject to foster parenting — the tree-construction
+/// algorithm inserts a comment token at the current node unconditionally,
+/// in every insertion mode — so re-marking the hole this way keeps it
+/// exactly where it was written. `compile_node`'s `Node::COMMENT_NODE` arm
+/// unwraps it again on the other side.
+///
+/// Must run on the fully-assembled sentinel HTML, after
+/// `build_sentinel_html` has already turned tag-*position* holes into
+/// literal `mr-slot-N` tag names — only surviving *content*-position hole
+/// tokens (still bare `MARK h<N> MARK` text at this point) are candidates.
+fn protect_table_context_holes(html: &str) -> String {
+	let chars: Vec<char> = html.chars().collect();
+	let n = chars.len();
+	let mut out = String::with_capacity(html.len());
+	let mut stack: Vec<String> = Vec::new();
+	let mut i = 0;
+
+	while i < n {
+		let c = chars[i];
+
+		if c == '<' {
+			if let Some(end) = skip_html_comment(&chars, i) {
+				out.extend(&chars[i..end]);
+				i = end;
+				continue;
+			}
+			if let Some(end) = skip_html_doctype(&chars, i) {
+				out.extend(&chars[i..end]);
+				i = end;
+				continue;
+			}
+			if chars.get(i + 1) == Some(&'/') {
+				let name_start = i + 2;
+				let name_end = scan_tag_name_end(&chars, name_start);
+				let name: String = chars[name_start..name_end].iter().collect();
+				let tag_end = scan_html_tag_end(&chars, name_end).end;
+				out.extend(&chars[i..tag_end]);
+				if stack.last().is_some_and(|t| t.eq_ignore_ascii_case(&name)) {
+					stack.pop();
+				}
+				i = tag_end;
+				continue;
+			}
+
+			let name_start = i + 1;
+			let name_end = scan_tag_name_end(&chars, name_start);
+			if name_end == name_start {
+				// Not actually a tag start (a bare '<' in text) — leave as-is.
+				out.push(c);
+				i += 1;
+				continue;
+			}
+			let name: String = chars[name_start..name_end].iter().collect();
+			let tag_end_scan = scan_html_tag_end(&chars, name_end);
+			out.extend(&chars[i..tag_end_scan.end]);
+			if !tag_end_scan.self_closing && !is_void_element(&name) {
+				stack.push(name);
+			}
+			i = tag_end_scan.end;
+			continue;
+		}
+
+		if c == MARK && stack.last().is_some_and(|t| TABLE_FOSTER_PARENTS.contains(&t.to_ascii_lowercase().as_str())) {
+			let mut j = i + 1;
+			while j < n && chars[j] != MARK {
+				j += 1;
+			}
+			let close = (j + 1).min(n);
+			out.push_str("<!--");
+			out.extend(&chars[i..close]);
+			out.push_str("-->");
+			i = close;
+			continue;
+		}
+
+		out.push(c);
+		i += 1;
+	}
+
+	out
+}
+
 fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
 	let html = build_sentinel_html(statics);
 	let html = expand_self_closing_tags(&html);
+	let html = protect_table_context_holes(&html);
 	let case_map = build_case_map(&html);
 
 	let (wrap_prefix, wrap_suffix, extra_depth) = first_tag_name(&html).map_or(("", "", 0), |tag| table_context_wrapper(&tag));
@@ -1291,6 +1418,58 @@ mod pure_logic_tests {
 	fn table_context_wrapper_no_op_for_ordinary_tags() {
 		assert_eq!(table_context_wrapper("div"), ("", "", 0));
 		assert_eq!(table_context_wrapper("table"), ("", "", 0));
+	}
+
+	// ── protect_table_context_holes ──
+
+	#[test]
+	fn protect_table_context_holes_wraps_hole_directly_in_tbody() {
+		let input = format!("<div><table><tbody>{}</tbody></table></div>", hole_token(0));
+		let expected = format!("<div><table><tbody><!--{}--></tbody></table></div>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), expected);
+	}
+
+	#[test]
+	fn protect_table_context_holes_wraps_hole_directly_in_table_without_tbody() {
+		let input = format!("<table>{}</table>", hole_token(0));
+		let expected = format!("<table><!--{}--></table>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), expected);
+	}
+
+	#[test]
+	fn protect_table_context_holes_wraps_hole_directly_in_tr() {
+		let input = format!("<table><tbody><tr>{}</tr></tbody></table>", hole_token(0));
+		let expected = format!("<table><tbody><tr><!--{}--></tr></tbody></table>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), expected);
+	}
+
+	#[test]
+	fn protect_table_context_holes_leaves_hole_in_td_alone() {
+		// <td> content is ordinary flow content, not table-foster-parent
+		// context — a hole there is already safe as plain text.
+		let input = format!("<table><tbody><tr><td>{}</td></tr></tbody></table>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), input);
+	}
+
+	#[test]
+	fn protect_table_context_holes_leaves_non_table_holes_alone() {
+		let input = format!("<div>{}</div>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), input);
+	}
+
+	#[test]
+	fn protect_table_context_holes_pops_stack_on_close_tag() {
+		// The hole comes after </tbody></table>, back in ordinary <div>
+		// content, so it must NOT be wrapped.
+		let input = format!("<table><tbody></tbody></table><div>{}</div>", hole_token(0));
+		assert_eq!(protect_table_context_holes(&input), input);
+	}
+
+	#[test]
+	fn protect_table_context_holes_handles_multiple_holes_in_tbody() {
+		let input = format!("<table><tbody>{}{}</tbody></table>", hole_token(0), hole_token(1));
+		let expected = format!("<table><tbody><!--{}--><!--{}--></tbody></table>", hole_token(0), hole_token(1));
+		assert_eq!(protect_table_context_holes(&input), expected);
 	}
 
 	#[test]
