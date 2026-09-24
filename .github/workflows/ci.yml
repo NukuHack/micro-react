@@ -44,5 +44,5 @@ jobs:
           chmod +x "/tmp/${BUILD_SCRIPT_NAME}"
 
       - name: Run build script
-        run: "/tmp/${BUILD_SCRIPT_NAME}" --web -y
+        run: "/tmp/${BUILD_SCRIPT_NAME} --web -y"
         
