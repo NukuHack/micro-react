@@ -6,42 +6,43 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # --- Change these in ONE place if the script moves/renames ---
+  BUILD_SCRIPT_REPO: NukuHack/script
+  BUILD_SCRIPT_REF: fe34d84c629ed1e749ecbcba94e7c00e5fd4825d # latest commit at time of editing
+  BUILD_SCRIPT_NAME: build
+  BUILD_SCRIPT_DIR: shell
+  # ------------------------------------------------------------
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      # 1. Check out your repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Install Rust toolchain (needed by the build script)
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 3. Cache cargo registry and build artifacts (optional but recommended)
       - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
-      # 4. Download the build script from the NukuHack/script repo
       - name: Fetch build script
         run: |
-          curl -fsSL https://raw.githubusercontent.com/NukuHack/script/main/shell/build.sh \
-            -o /tmp/build.sh
-          chmod +x /tmp/build.sh
+          URL="https://raw.githubusercontent.com/${BUILD_SCRIPT_REPO}/${BUILD_SCRIPT_REF}/${BUILD_SCRIPT_DIR}/${BUILD_SCRIPT_NAME}"
+          echo "Fetching: $URL"
+          curl -fsSL "$URL" -o "/tmp/${BUILD_SCRIPT_NAME}"
+          chmod +x "/tmp/${BUILD_SCRIPT_NAME}"
 
-      # 5. Run the script inside the repo
-      - name: Run build script in repo
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          /tmp/build.sh --web -y
-
-
+      - name: Run build script
+        run: "/tmp/${BUILD_SCRIPT_NAME}" --web -y
+        
