@@ -16,7 +16,7 @@ concurrency:
 env:
   # --- Change these in ONE place if the script moves/renames ---
   BUILD_SCRIPT_REPO: NukuHack/script
-  BUILD_SCRIPT_REF: bf3ad979332ec89afa1ed5324d2a702eeb6e3a72 # latest commit at time of editing
+  BUILD_SCRIPT_REF: 5feb61b501dcc7b3b378be5ebcc8228cf3b92f9a # latest commit at time of editing
   BUILD_SCRIPT_NAME: build
   BUILD_SCRIPT_DIR: shell
   # ------------------------------------------------------------
