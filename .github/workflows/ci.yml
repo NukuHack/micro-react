@@ -38,10 +38,10 @@ jobs:
             -o /tmp/build.sh
           chmod +x /tmp/build.sh
 
-      # 5. Run the script inside the micro-react directory of the repo
-      - name: Run build script in micro-react
+      # 5. Run the script inside the repo
+      - name: Run build script in repo
         run: |
-          cd "$GITHUB_WORKSPACE/micro-react"
-          /tmp/build.sh -c
+          cd "$GITHUB_WORKSPACE"
+          /tmp/build.sh --web -y
 
 
