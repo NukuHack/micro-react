@@ -343,6 +343,11 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 	// for props/children diffing against the new element.
 	let mut old_vnode = old_vnode;
 
+	// A tag-mismatch old vnode whose teardown (`unmount_vnode`) is deferred
+	// until after the new ref is attached below — see the comment on the
+	// `_other` arm for why.
+	let mut deferred_unmount: Option<&VNode> = None;
+
 	// Reuse or create DOM element
 	let dom: Element = match old_elem {
 		Some(e) if e.local_name() == tag => {
@@ -367,10 +372,21 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 			// always None there) and directly from a component's
 			// single-root `diff_node`, where nothing else would ever insert
 			// the new node or remove the old ones.
+			//
+			// `unmount_vnode` itself is *deferred* until after the new ref is
+			// attached (below), rather than run here: if `old` carries the
+			// same shared `NodeRef` as the new element (an unkeyed tag
+			// change, e.g. `<div ref={r}>` -> `<span ref={r}>`), running it
+			// here would clear the ref while it still points at the
+			// about-to-be-detached old node, firing a spurious detach
+			// callback moments before the new attach. Running it after the
+			// new ref is attached means the ref no longer "still points
+			// here" by the time `unmount_vnode` checks, so it correctly
+			// skips clearing it.
 			let mut stale_nodes: Vec<Node> = Vec::new();
 			if let Some(old) = old_vnode {
 				dom_nodes_of(old, &mut stale_nodes);
-				unmount_vnode(old, true);
+				deferred_unmount = Some(old);
 			}
 			let doc = document();
 			let new_elem = if let Some(ns) = ns_uri(&ns) { doc.create_element_ns(Some(ns), &tag)? } else { doc.create_element(&tag)? };
@@ -439,6 +455,13 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 	// Attach ref
 	if let Some(r) = &ref_ {
 		r.set(Some(dom.clone().into()));
+	}
+
+	// Now that any shared ref points at the new node, tear down the
+	// replaced old vnode — see the comment above on why this is deferred
+	// this late rather than run immediately in the `_other` arm above.
+	if let Some(old) = deferred_unmount {
+		unmount_vnode(old, true);
 	}
 
 	let dom_node: Node = dom.into();

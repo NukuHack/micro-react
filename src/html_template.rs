@@ -332,6 +332,65 @@ fn build_case_map(html: &str) -> HashMap<String, String> {
 	map
 }
 
+/// Recovers original tag-name casing the same way `build_case_map` recovers
+/// attribute-name casing: the browser's HTML parser lowercases *every*
+/// element's `local_name()` (this crate always parses `html` templates
+/// through the HTML, not XML/XHTML, parser), including camelCase SVG tags
+/// like `<linearGradient>` or `<clipPath>` — so without this, such a tag
+/// would silently render (and stay) lowercase forever. Scans the same
+/// concatenated static HTML `build_case_map` does, so it's static-text-only
+/// and holes can't affect it.
+fn build_tag_case_map(html: &str) -> HashMap<String, String> {
+	let mut map = HashMap::new();
+	let chars: Vec<char> = html.chars().collect();
+	let total_chars = chars.len();
+	let mut cursor = 0;
+
+	while cursor < total_chars {
+		if chars[cursor] == '<' {
+			// Skip an HTML comment's *entire* body up to its `-->`
+			// terminator — a naive "skip to the next `>`" would stop early
+			// at any `>` inside the comment text (e.g. a commented-out tag
+			// like `<!-- <linearGradient> -->`), leaving the rest of the
+			// comment to be misread as real markup.
+			if chars[cursor + 1..].starts_with(&['!', '-', '-']) {
+				cursor += 4;
+				while cursor < total_chars && !chars[cursor..].starts_with(&['-', '-', '>']) {
+					cursor += 1;
+				}
+				cursor = (cursor + 3).min(total_chars);
+				continue;
+			}
+			// Skip doctype-ish `<!...>` and closing tags `</...>` — closing
+			// tags carry no attributes, and this only needs one recorded
+			// sighting of each name.
+			if cursor + 1 < total_chars && matches!(chars[cursor + 1], '!' | '/') {
+				while cursor < total_chars && chars[cursor] != '>' {
+					cursor += 1;
+				}
+				cursor += 1;
+				continue;
+			}
+			let name_start = cursor + 1;
+			let mut name_end = name_start;
+			while name_end < total_chars && (chars[name_end].is_ascii_alphanumeric() || matches!(chars[name_end], '-' | '_' | ':')) {
+				name_end += 1;
+			}
+			if name_end > name_start {
+				let name: String = chars[name_start..name_end].iter().collect();
+				let lower = name.to_ascii_lowercase();
+				if name != lower {
+					map.insert(lower, name);
+				}
+			}
+			cursor = name_end;
+			continue;
+		}
+		cursor += 1;
+	}
+	map
+}
+
 fn normalize_attr_name(lowered: &str, case_map: &HashMap<String, String>) -> String {
 	// Prefer the casing the author wrote at this call-site — ground truth
 	// reconstructed before the parser lowercased it — over the generic
@@ -581,7 +640,7 @@ fn is_insignificant_ws(l: &str) -> bool {
 	l.is_empty() || (l.trim().is_empty() && l.contains('\n'))
 }
 
-fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<ChildTemplate> {
+fn compile_node(node: &Node, case_map: &HashMap<String, String>, tag_case_map: &HashMap<String, String>) -> Option<ChildTemplate> {
 	match node.node_type() {
 		Node::TEXT_NODE => {
 			let text = node.text_content().unwrap_or_default();
@@ -610,6 +669,11 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 		Node::ELEMENT_NODE => {
 			let elem: &Element = node.unchecked_ref();
 			let tag_name = elem.local_name();
+			// `local_name()` is always lowercase (HTML parsing), so restore
+			// camelCase SVG tag names (`linearGradient`, `clipPath`, …) from
+			// the original source text before treating this as the tag's
+			// real, static name.
+			let tag_name = tag_case_map.get(&tag_name).cloned().unwrap_or(tag_name);
 			let tag = tag_slot_index(&tag_name).map_or_else(|| TagSource::Static(tag_name), TagSource::Hole);
 
 			let mut attrs = Vec::new();
@@ -652,7 +716,7 @@ fn compile_node(node: &Node, case_map: &HashMap<String, String>) -> Option<Child
 			let child_nodes = node.child_nodes();
 			for i in 0..child_nodes.length() {
 				if let Some(c) = child_nodes.item(i)
-					&& let Some(ct) = compile_node(&c, case_map)
+					&& let Some(ct) = compile_node(&c, case_map, tag_case_map)
 				{
 					children.push(ct);
 				}
@@ -861,6 +925,7 @@ fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
 	let html = expand_self_closing_tags(&html);
 	let html = protect_table_context_holes(&html);
 	let case_map = build_case_map(&html);
+	let tag_case_map = build_tag_case_map(&html);
 
 	let (wrap_prefix, wrap_suffix, extra_depth) = first_tag_name(&html).map_or(("", "", 0), |tag| table_context_wrapper(&tag));
 
@@ -876,7 +941,7 @@ fn compile_template(statics: &[String]) -> Result<CompiledTemplate, JsValue> {
 	let child_nodes = root.child_nodes();
 	for i in 0..child_nodes.length() {
 		if let Some(c) = child_nodes.item(i)
-			&& let Some(ct) = compile_node(&c, &case_map)
+			&& let Some(ct) = compile_node(&c, &case_map, &tag_case_map)
 		{
 			roots.push(ct);
 		}
@@ -1287,6 +1352,29 @@ mod pure_logic_tests {
 	#[test]
 	fn case_map_ignores_text_content_and_comments() {
 		let map = build_case_map("<!-- setThemeIdx=\"nope\" --><p>shouldExplode=\"also nope\"</p>");
+		assert!(map.is_empty());
+	}
+
+	// ── build_tag_case_map: camelCase SVG tag-name restoration ──
+	// Regression coverage: `local_name()` is always lowercase for
+	// HTML-parsed elements, so a camelCase SVG tag like `<linearGradient>`
+	// used to render (and stay) as `<lineargradient>` forever, since only
+	// attribute names had a case-restoration path. `build_tag_case_map`
+	// recovers tag casing from the source text the same way `build_case_map`
+	// recovers attribute casing.
+
+	#[test]
+	fn tag_case_map_records_camel_case_svg_tag_names() {
+		let map = build_tag_case_map(r#"<svg><linearGradient id="g"><clipPath></clipPath></linearGradient></svg>"#);
+		assert_eq!(map.get("lineargradient").map(String::as_str), Some("linearGradient"));
+		assert_eq!(map.get("clippath").map(String::as_str), Some("clipPath"));
+		// Already-lowercase tags aren't recorded — nothing to restore.
+		assert_eq!(map.get("svg"), None);
+	}
+
+	#[test]
+	fn tag_case_map_ignores_closing_tags_and_comments() {
+		let map = build_tag_case_map("<!-- <linearGradient> --></linearGradient><div>text</div>");
 		assert!(map.is_empty());
 	}
 
