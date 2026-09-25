@@ -64,7 +64,7 @@ impl<T: Clone + 'static> Context<T> {
 	pub fn subscribe(&self, listener: Rc<dyn Fn()>) -> Box<dyn FnOnce()> {
 		let id = self.id;
 		CTX_LISTENERS.with(|m| {
-			m.borrow_mut().entry(id).or_insert_with(Vec::new).push(listener.clone());
+			m.borrow_mut().entry(id).or_default().push(listener.clone());
 		});
 		Box::new(move || {
 			CTX_LISTENERS.with(|m| {

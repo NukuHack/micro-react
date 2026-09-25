@@ -1,17 +1,25 @@
-//! Single entry point for every DOM/browser-backed test.
+//! Entry point for the lower-risk half of the DOM/browser-backed tests.
 //!
 //! `wasm-pack test --headless --firefox` launches a fresh browser context
-//! per *test binary*, and each file directly under `tests/` compiles to
-//! its own binary — so with 10 separate browser-test files that was 10
-//! context spin-ups (the slow part) to run a total of well under a
-//! second's worth of actual test code.
+//! (and a fresh wasm module instance) per *test binary*. Everything in one
+//! binary shares that single instance, and nothing resets the crate's
+//! module-level state (the vnode id counter, `VNODE_STORE`, the module
+//! loader cache, context listener maps, ...) between individual
+//! `#[wasm_bindgen_test]` functions — they only get a clean slate at the
+//! start of a binary.
 //!
-//! Putting them all behind one binary (this file, with the rest living as
-//! submodules under `tests/browser/`) means `wasm-pack test` opens exactly
-//! one browser context and runs all of them in it. Split a module back out
-//! into its own top-level `tests/*.rs` file only if it genuinely needs an
-//! isolated context (e.g. something that mutates global/shared browser
-//! state in a way that would leak across tests).
+//! That's harmless for tests that don't lean on precise DOM node identity
+//! or ordering surviving across many renders. It's the exact thing that
+//! bit us in tests/browser_reconciliation.rs, so that half lives in its
+//! own binary/session instead — see the doc comment there for which
+//! modules moved and why. Everything below is the "doesn't hammer that
+//! machinery" half: parsing/matching logic, hook wiring, bindings
+//! conversions, and DOM-touching tests that don't depend on node identity
+//! surviving repeated mount/unmount/reorder cycles.
+//!
+//! Split a module back out into its own top-level `tests/*.rs` file only
+//! if it genuinely needs an isolated context (e.g. something that mutates
+//! global/shared browser state in a way that would leak across tests).
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -33,20 +41,8 @@ mod events_dom;
 mod events_unit;
 #[path = "browser/hooks_scheduler.rs"]
 mod hooks_scheduler;
-#[path = "browser/html_template.rs"]
-mod html_template;
-#[path = "browser/imperative_handle_and_suspense.rs"]
-mod imperative_handle_and_suspense;
 #[path = "browser/module_loading.rs"]
 mod module_loading;
-#[path = "browser/portals.rs"]
-mod portals;
-#[path = "browser/reconciler.rs"]
-mod reconciler;
-#[path = "browser/refs_dom.rs"]
-mod refs_dom;
-#[path = "browser/render_root.rs"]
-mod render_root;
 #[path = "browser/router.rs"]
 mod router;
 #[path = "browser/router_gaps.rs"]
