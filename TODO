@@ -4,18 +4,7 @@ read md before any modification do not run or compile the code, only unzip
 
 ## Bugs
 
-New, confirmed bugs (not in the TODO at all)
-
-1. Keyed-list reconciler reorders incorrectly
-
-Three separate tests fail on this, and they show a consistent pattern:
-
-reconciler::keyed_list_reorder_preserves_dom_nodes_by_key: reordering [Apple, Banana, Cherry] → [Cherry, Apple, Banana] (keyed a/b/c) produces [Cherry, Banana, Apple] instead — the last two items end up swapped.
-html_template::keyed_list_reorder_preserves_dom_identity_through_html_template: same exact failure through the JSX/template path, confirming it's the shared reconciler, not template-specific.
-reconciler::stress_random_reorderings_of_keyed_list_never_panic_and_end_in_key_order: with 34 items, 32 land in the right place and the last two are swapped — same signature at scale.
-reconciler::stress_random_reorderings_with_duplicate_and_unkeyed_siblings_never_panic: a 15-item unkeyed/duplicate-key stress test also lands with elements out of order.
-
-I traced the intended algorithm (find_match's skewed bidirectional search + the skew bookkeeping in diff_children) by hand against the simple 3-item case and it should produce the correct order, which means the actual defect is more subtle than the documented "skew" logic suggests — possibly in how the tail element's insertion is skipped when should_insert is false but its neighbor has already moved out from under it. I'd want to add print/log instrumentation or a debugger rather than guess further by inspection. This is a real, load-bearing correctness bug in the reconciler (the one thing CONTRIBUTING.md's testing policy cares most about), and it's currently shipping — CI would need to fail on this, but the run continued (WARNING: DOM-backed tests failed ... Continuing anyway).
+None currently known.
 
 ## Test coverage gaps
 

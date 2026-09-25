@@ -283,15 +283,26 @@ impl NodeRef {
 	pub fn new() -> Self {
 		Self { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: None }
 	}
-	/// Create a `NodeRef` that calls `sync` (with the new node, or `None` on
-	/// unmount) every time the DOM node it's attached to changes.
+	/// Create a `NodeRef` that calls `sync` on attach (`Some(node)`) and on
+	/// detach (`None`) — i.e. whenever the ref's *presence* changes, not on
+	/// every reassignment. An unkeyed tag change (`<div ref={r}>` ->
+	/// `<span ref={r}>`) reassigns the same shared ref to a genuinely
+	/// different DOM node while it stays attached throughout — `.node`
+	/// tracks that new target immediately either way, but `sync` only
+	/// fires again once the ref actually becomes detached (`None`) or
+	/// re-attached from `None`, so callers don't see a redundant "still
+	/// attached" notification for a swap they didn't ask about.
 	pub fn with_sync(sync: impl Fn(Option<web_sys::Node>) + 'static) -> Self {
 		Self { node: std::rc::Rc::new(std::cell::RefCell::new(None)), sync: Some(std::rc::Rc::new(sync)) }
 	}
 	pub(crate) fn set(&self, node: Option<web_sys::Node>) {
+		let was_present = self.node.borrow().is_some();
 		self.node.borrow_mut().clone_from(&node);
 		if let Some(f) = &self.sync {
-			f(node);
+			let now_present = node.is_some();
+			if now_present != was_present {
+				f(node);
+			}
 		}
 	}
 }

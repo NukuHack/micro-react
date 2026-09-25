@@ -209,6 +209,24 @@ fn place_nodes(parent_dom: &Node, nodes: &[Node], cursor: Option<&Node>) -> Resu
 	let (Some(first), Some(last)) = (nodes.first(), nodes.last()) else {
 		return Ok(());
 	};
+	// A cursor equal to `first` is a legitimate "already exactly here"
+	// signal (e.g. the very first old node still attached genuinely is
+	// this group's own first node when nothing precedes it) — the check
+	// below relies on that and must keep seeing it.
+	//
+	// But a cursor equal to some *other*, later member of `nodes` is not:
+	// it means the caller's "first old node still attached" search landed
+	// inside this very group at the wrong element (e.g. a Fragment that
+	// is the *only* child at its level, where the old list being scanned
+	// is entirely this group's own old children, in old order — after an
+	// internal reorder the old-first survivor needn't be the new-first
+	// element). Inserting every node in `nodes` before such an anchor is
+	// self-referential: DOM's insertBefore(node, node) carve-out makes
+	// that one step a no-op, but every node processed *after* it in the
+	// loop still gets spliced in right before it, scrambling an
+	// already-correctly-ordered group. Treat that as "no external anchor"
+	// instead.
+	let cursor = cursor.filter(|c| first.is_same_node(Some(*c)) || !nodes.iter().any(|n| n.is_same_node(Some(*c))));
 	let contiguous = nodes.iter().all(|n| is_child_of(n, parent_dom))
 		&& nodes.windows(2).all(|w| w[0].next_sibling().is_some_and(|s| s.is_same_node(Some(&w[1]))));
 	if contiguous
