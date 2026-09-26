@@ -20,7 +20,7 @@ features = [
   "console",
   "Attr", "AnimationEvent",
   "ClipboardEvent", "Comment", "CssStyleDeclaration",
-  "Document", "DocumentFragment", "DomParser", "DragEvent",
+  "Document", "DocumentFragment", "DomParser", "DomTokenList", "DragEvent",
   "Element", "Event", "EventTarget",
   "FocusEvent",
   "History", "HtmlCollection", "HtmlElement", "HtmlHeadElement",
