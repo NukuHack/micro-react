@@ -33,6 +33,41 @@ jobs:
       - name: Build
         run: wasm-pack build --target web --release
 
+      - name: Generate landing page
+        run: |
+          NAME=$(grep -m1 '^name' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          MOD=${NAME//-/_}                       # wasm-pack snake_cases file names
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          BASE="https://${OWNER}.github.io/${REPO}"
+
+          cat > pkg/index.html <<HTML
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>${NAME} — nightly wasm</title>
+          <style>
+            body{font:14px/1.6 ui-monospace,Menlo,monospace;max-width:46rem;margin:2rem auto;padding:0 1rem}
+            code{background:#f4f4f4;padding:.15rem .35rem;border-radius:4px}
+            pre{background:#f4f4f4;padding:.75rem;border-radius:6px;overflow:auto}
+            li{margin:.15rem 0}
+          </style>
+          <h1>${NAME}</h1>
+          <p>Nightly WebAssembly build. Import the JS — it fetches the WASM for you.</p>
+
+          <pre>import init, { /* exports */ } from "${BASE}/${MOD}.js";
+
+          await init();</pre>
+
+          <h2>Files</h2>
+          <ul>
+            <li><a href="${MOD}.js">${MOD}.js</a> — JS glue <em>(import this)</em></li>
+            <li><a href="${MOD}_bg.wasm">${MOD}_bg.wasm</a> — WASM <em>(auto-fetched by the JS)</em></li>
+            <li><a href="${MOD}.d.ts">${MOD}.d.ts</a> — TypeScript types</li>
+          </ul>
+
+          <p>Commit <code>${{ github.sha }}</code>.</p>
+          HTML
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
