@@ -1297,14 +1297,42 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 	}
 
 	// style — accepts either a CSS string or a JS style object; js_val_to_prop_val
-	// preserves objects as PropVal::Js and we convert them to CSS text (camelCase -> kebab-case) here.
+	// preserves objects as PropVal::Js and we convert them to individual CSS
+	// properties (camelCase -> kebab-case) here.
+	//
+	// Deliberately per-property (`CSSStyleDeclaration.setProperty`/
+	// `removeProperty`), never a wholesale `style.cssText = ...`. The
+	// naive wholesale form used to live here, and — like the children/
+	// textContent bailout above — it fought a whole class of third-party
+	// DOM rewriting that targets this exact attribute: Dark Reader's
+	// dynamic theme (and the browser extension of the same name) can't
+	// win specificity against an element's own inline colors purely via
+	// an injected stylesheet, so it rewrites the inline `style` attribute
+	// directly to swap in dark-mode colors; Prism's line-numbers plugin
+	// similarly sets inline style declarations on the same `<pre>` a
+	// `style={{...}}` prop lives on to size the gutter. Resetting the
+	// whole attribute string on every re-render — which, note, happens
+	// unconditionally above since `apply_props` doesn't skip props whose
+	// value is unchanged — wiped those out on the very next render of
+	// anything in the subtree, which looked like "Dark Reader/Prism just
+	// doesn't work" rather than what it was: this element's own `style`
+	// prop stomping properties it doesn't own. Only ever touch the
+	// properties *this* vnode's `style` prop declares; anything else on
+	// the element's inline style is left alone.
 	if key == "style" {
 		let el: &web_sys::HtmlElement = dom.unchecked_ref();
-		let css_text = match value {
-			PropVal::Js(obj) => js_style_obj_to_css_text(obj),
-			_ => prop_str(value),
-		};
-		el.style().set_css_text(&css_text);
+		let style = el.style();
+		let new_pairs = style_prop_to_pairs(value);
+		let old_pairs = old_value.map(style_prop_to_pairs).unwrap_or_default();
+
+		for (k, _) in &old_pairs {
+			if !new_pairs.iter().any(|(nk, _)| nk == k) {
+				let _ = style.remove_property(k);
+			}
+		}
+		for (k, v) in &new_pairs {
+			let _ = style.set_property(k, v);
+		}
 		return Ok(());
 	}
 
@@ -1422,7 +1450,15 @@ fn remove_prop(dom: &Element, key: &str, old_val: &PropVal, ns: &str) -> Result<
 		return Ok(());
 	}
 	if key == "style" {
-		dom.unchecked_ref::<web_sys::HtmlElement>().style().set_css_text("");
+		// Same reasoning as `set_prop`'s "style" branch: only remove the
+		// properties this vnode's `style` prop used to declare, never
+		// wipe the whole attribute — a third party (Dark Reader, Prism's
+		// line-numbers plugin) may have added unrelated declarations to
+		// the same inline style that aren't ours to clear.
+		let style = dom.unchecked_ref::<web_sys::HtmlElement>().style();
+		for (k, _) in style_prop_to_pairs(old_val) {
+			let _ = style.remove_property(&k);
+		}
 		return Ok(());
 	}
 	dom.remove_attribute(key)?;
@@ -1455,16 +1491,28 @@ fn prop_val_to_string_set(v: &PropVal) -> std::collections::HashSet<String> {
 	std::iter::once(prop_str(v)).collect()
 }
 
-/// Convert a JS style object (`{ fontSize: '1rem' }`) into CSS text
-/// (`font-size: 1rem;`), the way React does for `style={{...}}`.
-fn js_style_obj_to_css_text(obj: &JsValue) -> String {
+/// Convert a `style` prop value (a JS style object like `{ fontSize:
+/// '1rem' }`, or a plain CSS string) into an ordered list of
+/// `(kebab-case-property, value)` pairs, the way React reads `style={{...}}`.
+/// Used to diff and apply style *per property* — see the "style" branches
+/// of `set_prop`/`remove_prop` for why a wholesale `cssText` replacement
+/// isn't used instead.
+fn style_prop_to_pairs(value: &PropVal) -> Vec<(String, String)> {
+	match value {
+		PropVal::Js(obj) => style_obj_to_pairs(obj),
+		PropVal::Str(s) => style_text_to_pairs(s),
+		_ => Vec::new(),
+	}
+}
+
+fn style_obj_to_pairs(obj: &JsValue) -> Vec<(String, String)> {
 	if !obj.is_object() {
-		return String::new();
+		return Vec::new();
 	}
 	let Some(o) = obj.dyn_ref::<Object>() else {
-		return String::new();
+		return Vec::new();
 	};
-	let mut out = String::new();
+	let mut out = Vec::new();
 	for key in Object::keys(o).iter() {
 		let Some(key_str) = key.as_string() else {
 			continue;
@@ -1483,12 +1531,28 @@ fn js_style_obj_to_css_text(obj: &JsValue) -> String {
 		} else {
 			continue;
 		};
-		out.push_str(&camel_to_kebab(&key_str));
-		out.push_str(": ");
-		out.push_str(&val_str);
-		out.push_str("; ");
+		out.push((camel_to_kebab(&key_str), val_str));
 	}
 	out
+}
+
+/// Parses a plain CSS text style string (`"color: red; font-size: 1rem"`)
+/// into the same `(property, value)` shape `style_obj_to_pairs` produces,
+/// for the (rarer) case of `style="..."` passed as a string rather than an
+/// object. Property names are used as-is (already kebab-case in CSS text).
+fn style_text_to_pairs(text: &str) -> Vec<(String, String)> {
+	text
+		.split(';')
+		.filter_map(|decl| {
+			let (prop, val) = decl.split_once(':')?;
+			let prop = prop.trim();
+			let val = val.trim();
+			if prop.is_empty() || val.is_empty() {
+				return None;
+			}
+			Some((prop.to_string(), val.to_string()))
+		})
+		.collect()
 }
 
 fn camel_to_kebab(s: &str) -> String {
