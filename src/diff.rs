@@ -466,7 +466,35 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 		}
 		let mut ch = children;
 		let child_ns = if tag == "foreignObject" { "html".to_string() } else { ns };
-		diff_children(&dom_node, &mut ch, &old_children, &child_ns, None)?;
+
+		// Fast-path bailout mirroring React's `shouldSetTextContent`: a host
+		// element whose only child is a single Text vnode with an unchanged
+		// string is left completely alone below — no DOM read or write at
+		// all for its children. Without this, the general path re-derives
+		// "is our tracked node still attached where we left it?" from the
+		// *previous* vnode's `dom_node` handle every render, and reinserts
+		// it whenever that check comes back false — even when the text
+		// itself never changed. That handle goes stale for reasons entirely
+		// outside the reconciler's control: most commonly a third-party
+		// script (e.g. `Prism.highlightElement`, or DarkReader's DOM
+		// rewriting) replacing this element's `innerHTML` out of band, which
+		// detaches our tracked text node without our knowledge. Real React
+		// never notices because it bails out of touching `textContent`
+		// entirely once the string is unchanged; mirroring that here means
+		// an externally-managed subtree survives an unrelated re-render
+		// elsewhere in the tree instead of having a stray plain-text node
+		// spliced back in alongside (or instead of) what the third party put there.
+		let already_highlighted_bailout = matches!(
+			(ch.as_slice(), old_children.as_slice()),
+			([VNode { inner: VNodeInner::Text(new_t), .. }], [VNode { inner: VNodeInner::Text(old_t), dom_node: Some(_), .. }])
+				if new_t == old_t
+		);
+
+		if already_highlighted_bailout {
+			ch[0].dom_node.clone_from(&old_children[0].dom_node);
+		} else {
+			diff_children(&dom_node, &mut ch, &old_children, &child_ns, None)?;
+		}
 		ch
 	};
 

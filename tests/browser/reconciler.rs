@@ -813,3 +813,62 @@ fn component_root_element_tag_change_replaces_dom_node_in_place() {
 	assert_eq!(container.query_selector("div").unwrap().and_then(|d| d.text_content()).as_deref(), Some("First"));
 	assert_eq!(container.children().length(), 1);
 }
+
+// ─── Externally-mutated single-text-child subtree survives an unrelated re-render ───
+
+#[wasm_bindgen_test]
+fn unchanged_text_child_is_not_touched_after_third_party_rewrites_its_innerhtml() {
+	// Regression test for a real-world bug: a component renders
+	// `<code>{code_string}</code>` (a single, unchanged Text child across
+	// re-renders) and something outside the reconciler — a syntax
+	// highlighter like Prism.js calling `highlightElement`, or DarkReader
+	// rewriting colored inline content — replaces that element's
+	// `innerHTML` with its own markup, detaching our tracked Text node in
+	// the process. Before the fix, an unrelated re-render elsewhere in the
+	// tree (anything that shares state with this component, e.g. a
+	// dark-mode toggle re-rendering the whole layout) would notice our
+	// tracked text node is no longer attached and unconditionally splice
+	// it back in via `diff_children`, corrupting the highlighter's output
+	// even though the text itself never changed. The fix bails out of
+	// touching an element's children at all once its only child is a Text
+	// vnode with an unchanged value.
+	let container = make_container();
+	let mut root = Root::new(container.clone());
+
+	let toggle_slot: Rc<RefCell<Option<Rc<dyn Fn(bool)>>>> = Rc::new(RefCell::new(None));
+	let toggle_slot_for_comp = toggle_slot.clone();
+
+	// `code_string` never changes across renders — only unrelated sibling
+	// state does — mirroring `CodeBlock`'s `<code>{code}</code>` next to a
+	// `dark_mode`/`editable` toggle living in the same render pass.
+	let comp = ComponentFn::infallible(move |_props: Props| {
+		let (_unrelated, set_unrelated) = micro_react::hooks::use_state(false);
+		*toggle_slot_for_comp.borrow_mut() = Some(set_unrelated);
+		VNode::tag("div").children(vec![VNode::tag("code").text("let x = 1;").build()]).build()
+	});
+
+	root.render(VNode::component("Highlighted", comp, vec![])).expect("initial render should succeed");
+
+	let code_el = container.query_selector("code").unwrap().expect("code element should be mounted");
+	// Simulate Prism.highlightElement(): it tokenizes the plain text and
+	// replaces the element's entire contents with its own span markup,
+	// detaching the reconciler's tracked Text node along the way.
+	code_el.set_inner_html(r#"<span class="token keyword">let</span> x = <span class="token number">1</span>;"#);
+	assert_eq!(code_el.query_selector_all("span").unwrap().length(), 2, "sanity check: highlighter markup landed");
+
+	// Trigger a re-render from unrelated state, with the code string itself unchanged.
+	let set_unrelated = toggle_slot.borrow().clone().expect("component should have registered its setter on mount");
+	set_unrelated(true);
+	micro_react::scheduler::flush_rerenders();
+
+	assert_eq!(
+		code_el.query_selector_all("span").unwrap().length(),
+		2,
+		"the highlighter's spans should survive an unrelated re-render, not be replaced or duplicated by a reinserted plain-text node"
+	);
+	assert_eq!(
+		code_el.text_content().as_deref(),
+		Some("let x = 1;"),
+		"visible text should still read correctly through the highlighter's markup, not appear twice"
+	);
+}
