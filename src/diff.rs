@@ -443,7 +443,7 @@ fn diff_element(parent_dom: &Node, new_vnode: &mut VNode, old_vnode: Option<&VNo
 	}
 
 	// Apply props
-	apply_props(&dom, &props, &old_props, &ns)?;
+	apply_props(&dom, &props, &old_props)?;
 
 	// Handle children or dangerouslySetInnerHTML
 	let has_inner_html = props.iter().any(|(k, _)| k == "dangerouslySetInnerHTML.__html");
@@ -928,7 +928,20 @@ pub fn diff_children(
 	for i in 0..new_len {
 		let cv = &new_children[i];
 		let skewed = (i as i32) + skew;
-		let idx = find_match(cv, old_children, skewed as usize, &matched);
+		// Unkeyed children pair up strictly by position (React semantics):
+		// a `{cond && <div/>}` placeholder (Null) sitting before a sibling
+		// `<div/>` must not let the new div steal the old sibling's DOM node
+		// just because their tags happen to match. Only keyed children go
+		// through the skew/bidirectional search.
+		let is_keyed = cv.key().is_some();
+		let idx = if is_keyed {
+			find_match(cv, old_children, skewed as usize, &matched)
+		} else {
+			match old_children.get(i) {
+				Some(old) if !matched[i] && old.key().is_none() && old.type_tag() == cv.type_tag() => i as i32,
+				_ => -1,
+			}
+		};
 		match_indices[i] = idx;
 		if idx >= 0 {
 			matched[idx as usize] = true;
@@ -938,7 +951,11 @@ pub fn diff_children(
 		let is_insertable = matches!(cv.inner, VNodeInner::Element { .. } | VNodeInner::Text(_));
 
 		let is_mounting = idx < 0;
-		if is_mounting {
+		if !is_keyed {
+			if is_mounting && is_insertable {
+				new_children[i].flags |= FLAG_INSERT;
+			}
+		} else if is_mounting {
 			if new_len > old_children.len() {
 				skew -= 1;
 			} else if new_len < old_children.len() {
@@ -1249,7 +1266,7 @@ fn is_safe_url(val: &str) -> bool {
 	!matches!(scheme_end, Some(i) if i > 0 && trimmed.as_bytes()[i] == b':')
 }
 
-fn apply_props(dom: &Element, new_props: &Props, old_props: &Props, ns: &str) -> Result<(), JsValue> {
+fn apply_props(dom: &Element, new_props: &Props, old_props: &Props) -> Result<(), JsValue> {
 	// Remove props that vanished
 	for (k, old_val) in old_props {
 		if k == "children" || k == "key" || k == "ref" {
@@ -1257,7 +1274,7 @@ fn apply_props(dom: &Element, new_props: &Props, old_props: &Props, ns: &str) ->
 		}
 		let still_present = new_props.iter().any(|(nk, _)| nk == k);
 		if !still_present {
-			remove_prop(dom, k, old_val, ns)?;
+			remove_prop(dom, k, old_val)?;
 		}
 	}
 	// Set / update props
@@ -1266,12 +1283,12 @@ fn apply_props(dom: &Element, new_props: &Props, old_props: &Props, ns: &str) ->
 			continue;
 		}
 		let old_val = old_props.iter().find(|(ok, _)| ok == k).map(|(_, v)| v);
-		set_prop(dom, k, new_val, old_val, ns)?;
+		set_prop(dom, k, new_val, old_val)?;
 	}
 	Ok(())
 }
 
-fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVal>, ns: &str) -> Result<(), JsValue> {
+fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVal>) -> Result<(), JsValue> {
 	if BLOCKED_ATTRS.contains(&key) {
 		return Ok(());
 	}
@@ -1449,7 +1466,7 @@ fn set_prop(dom: &Element, key: &str, value: &PropVal, old_value: Option<&PropVa
 	Ok(())
 }
 
-fn remove_prop(dom: &Element, key: &str, old_val: &PropVal, ns: &str) -> Result<(), JsValue> {
+fn remove_prop(dom: &Element, key: &str, old_val: &PropVal) -> Result<(), JsValue> {
 	if let Some((event_name, capture)) = parse_event_prop(key) {
 		let old_fn = prop_fn(old_val);
 		set_event_handler(dom, &event_name, capture, None, old_fn);
@@ -1578,8 +1595,7 @@ fn style_obj_to_pairs(obj: &JsValue) -> Vec<(String, String)> {
 /// for the (rarer) case of `style="..."` passed as a string rather than an
 /// object. Property names are used as-is (already kebab-case in CSS text).
 fn style_text_to_pairs(text: &str) -> Vec<(String, String)> {
-	text
-		.split(';')
+	text.split(';')
 		.filter_map(|decl| {
 			let (prop, val) = decl.split_once(':')?;
 			let prop = prop.trim();
