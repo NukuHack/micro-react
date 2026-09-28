@@ -1595,7 +1595,8 @@ fn style_obj_to_pairs(obj: &JsValue) -> Vec<(String, String)> {
 /// for the (rarer) case of `style="..."` passed as a string rather than an
 /// object. Property names are used as-is (already kebab-case in CSS text).
 fn style_text_to_pairs(text: &str) -> Vec<(String, String)> {
-	text.split(';')
+	text
+		.split(';')
 		.filter_map(|decl| {
 			let (prop, val) = decl.split_once(':')?;
 			let prop = prop.trim();

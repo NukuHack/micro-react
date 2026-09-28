@@ -12,7 +12,7 @@ use web_sys::{DomParser, Element, Node, SupportedType};
 
 use crate::bindings::{children_to_js, js_ref_to_node_ref, js_to_vnode, js_val_to_prop_val, props_to_js_object, vnode_to_js};
 use crate::scan::{scan_html_tag_end, scan_tag_name_end, skip_html_comment, skip_html_doctype};
-use crate::vnode::{ComponentFn, NodeRef, PropVal, Props, VNode, VNodeInner};
+use crate::vnode::{ComponentFn, NodeRef, PropVal, Props, VNode};
 
 // ─────────────────────────── sentinel tokens ───────────────────────────
 
@@ -1047,18 +1047,14 @@ fn render_child(ct: &ChildTemplate, values: &Array, out: &mut Vec<VNode>) {
 			// vnode: pass-through vnodes (incl. nested `html` calls),
 			// arrays → fragment, strings/numbers → text, null/bool → null.
 			let v = values.get(*i as u32);
-			if let Ok(vn) = js_to_vnode(&v)
-				&& !matches!(vn.inner, VNodeInner::Null)
-			{
+			if let Ok(vn) = js_to_vnode(&v) {
 				out.push(vn);
 			}
 		}
 		ChildTemplate::HoleSeq(indices) => {
 			for i in indices {
 				let v = values.get(*i as u32);
-				if let Ok(vn) = js_to_vnode(&v)
-					&& !matches!(vn.inner, VNodeInner::Null)
-				{
+				if let Ok(vn) = js_to_vnode(&v) {
 					out.push(vn);
 				}
 			}

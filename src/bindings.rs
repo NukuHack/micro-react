@@ -9,7 +9,7 @@ use web_sys::Element;
 use crate::context::use_context;
 use crate::hooks::{DepVal, current_inst, current_weak, use_id, use_layout_effect, use_memo, use_reducer_cell, use_state_cell_lazy};
 use crate::render::Root;
-use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode, VNodeInner};
+use crate::vnode::{ComponentFn, JsCallback, NodeRef, PropVal, Props, VNode};
 
 // Setter-closure cache: each hook has one stable backing cell, so cache
 // its JS setter (keyed by cell address) instead of leaking a new closure
@@ -239,10 +239,12 @@ pub fn create_element(type_: &JsValue, props: &JsValue, children: JsValue) -> Re
 	}
 
 	let mut child_vnodes: Vec<VNode> = Vec::new();
+	// Null/false/undefined children are kept as `Null` placeholders (not
+	// dropped) so unkeyed siblings keep their positional identity, exactly
+	// like React: `[cond && <A/>, <B/>]` must not let <B/> be matched
+	// against the DOM node that <A/> used to own.
 	for child in children.iter() {
-		if let Ok(vn) = js_to_vnode(&child)
-			&& !matches!(vn.inner, VNodeInner::Null)
-		{
+		if let Ok(vn) = js_to_vnode(&child) {
 			child_vnodes.push(vn);
 		}
 	}
@@ -1016,7 +1018,7 @@ pub(crate) fn js_to_vnode(v: &JsValue) -> Result<VNode, JsValue> {
 
 	// Array → fragment
 	if let Ok(arr) = v.clone().dyn_into::<Array>() {
-		let children: Vec<VNode> = arr.iter().filter_map(|c| js_to_vnode(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect();
+		let children: Vec<VNode> = arr.iter().filter_map(|c| js_to_vnode(&c).ok()).collect();
 		return Ok(VNode::fragment(children));
 	}
 
@@ -1073,7 +1075,7 @@ pub(crate) fn js_to_vnode_peek(v: &JsValue) -> Result<VNode, JsValue> {
 	}
 
 	if let Ok(arr) = v.clone().dyn_into::<Array>() {
-		let children: Vec<VNode> = arr.iter().filter_map(|c| js_to_vnode_peek(&c).ok()).filter(|v| !matches!(v.inner, VNodeInner::Null)).collect();
+		let children: Vec<VNode> = arr.iter().filter_map(|c| js_to_vnode_peek(&c).ok()).collect();
 		return Ok(VNode::fragment(children));
 	}
 
@@ -1176,7 +1178,7 @@ pub(crate) fn props_to_js_object(props: &Props) -> JsValue {
 #[cfg(test)]
 mod vnode_store_tests {
 	use super::*;
-	use crate::vnode::VNode;
+	use crate::vnode::{VNode, VNodeInner};
 
 	fn reset_store() {
 		VNODE_STORE.with(|s| s.borrow_mut().clear());
